@@ -12,7 +12,7 @@ Five words do all the work, and they will make more sense if you meet them
 before you type them.
 
 **Repository** ("repo"). A folder that GitHub keeps a copy of, with its full
-history. Yours will be a website at `github.com/<your-username>/robotrack`.
+history. Yours will be a website at `github.com/Fettucciny/Biohybrid-Robot-Tracker`.
 
 **Commit.** A saved snapshot of the folder, with a note attached. Nothing is
 sent anywhere yet — a commit is local, on your own disk.
@@ -74,10 +74,20 @@ Set them once, for all projects:
 
 ```powershell
 git config --global user.name "Yikang Xu"
-git config --global user.email "xuyikang201108@gmail.com"
+git config --global user.email "<your GitHub no-reply address>"
 ```
 
-Use the same email as your GitHub account, so GitHub links the commits to you.
+**Use GitHub's no-reply address, not your real one.** Every commit carries its
+author's email forever, in public, where it is trivially scraped. GitHub gives
+you a permanent alias that still links commits to your account: go to
+**https://github.com/settings/emails** and read the address shown under *"Keep
+my email addresses private"*. It looks like
+`12345678+Fettucciny@users.noreply.github.com` — copy it exactly, the leading
+number is your account ID.
+
+If you skip this and GitHub's *"Block command line pushes that expose my email"*
+setting is on, the push is rejected at the very end with error `GH007`. The fix
+after the fact is in the troubleshooting table below.
 
 ## Step 3. Go to the project folder
 
@@ -214,33 +224,85 @@ This asks a short series of questions with arrow-key menus. The answers:
 
 It then shows an eight-character code like `A1B2-C3D4`. Copy it, press Enter,
 and your browser opens to a GitHub page asking for that code. Paste it,
-authorise, and go back to PowerShell — it will say *"Logged in as
-&lt;your-username&gt;"*.
+authorise, and go back to PowerShell — it will say *"Logged in as Fettucciny"*.
 
 If you do not have a GitHub account yet, make one at github.com first; it is
 free and takes a minute.
 
-## Step 8. Create the repository and upload
+## Step 8. Connect to the repository and upload
+
+The repository already exists at
+`github.com/Fettucciny/Biohybrid-Robot-Tracker`, so this step is *connect and
+upload*, not create. Do **not** run `gh repo create` — that command makes a new
+repository and fails with *"Name already exists on this account"* when one is
+already there.
 
 ```powershell
-gh repo create robotrack --public --source=. --remote=origin --push
-```
-
-One command doing four things: create a repository named `robotrack` on your
-account, make it public, connect it to this folder (`--source=.` means "this
-folder"), and upload everything (`--push`).
-
-It prints the URL of your new repository. Open it in a browser — your files
-should all be there, with the README displayed underneath them.
-
-*If you would rather not use `gh`:* create an empty repository named `robotrack`
-on github.com — do **not** tick "Add a README", "Add .gitignore" or "Choose a
-license", since you already have all three and they will collide — then run:
-
-```powershell
-git remote add origin https://github.com/<your-username>/robotrack.git
+git remote add origin https://github.com/Fettucciny/Biohybrid-Robot-Tracker.git
 git push -u origin main
 ```
+
+`git remote add origin <url>` writes GitHub's address into your local repo under
+the nickname `origin`; nothing is transferred yet. `git push -u origin main`
+does the upload, and the `-u` makes `origin main` the default so that every
+later push is just `git push`.
+
+Open the repository in a browser — your files should all be there, with the
+README displayed underneath them.
+
+### If the push is rejected
+
+If you created the repository with "Add a README", a licence or a `.gitignore`
+ticked, GitHub already put a commit in it that your local copy has never seen,
+and git refuses to overwrite history it does not recognise:
+
+```
+! [rejected]  main -> main (fetch first)
+error: failed to push some refs
+```
+
+Those starter files are auto-generated and you have better versions of all three
+already, so the fix is to tell git that your copy is the authoritative one:
+
+```powershell
+git push -u origin main --force
+```
+
+`--force` is worth being careful with in general — it discards whatever was on
+the remote. Here that is nothing but GitHub's placeholder commit, which is why
+it is safe *this once*. Do not make a habit of it on a repository other people
+are also pushing to.
+
+### If you ever rename your GitHub account
+
+GitHub redirects the old URL to the new one, so things keep working — right up
+until someone else registers your old username, at which point every redirect
+breaks at once. Treat the redirect as a grace period, not a solution, and update
+these three:
+
+```powershell
+git remote set-url origin https://github.com/Fettucciny/Biohybrid-Robot-Tracker.git
+git remote -v                        # confirm both lines say Fettucciny
+```
+
+...the update channel in the app's Settings (`github:Fettucciny/Biohybrid-Robot-Tracker`),
+and the no-reply address from Step 2, which contains your username. Read the new
+one off **https://github.com/settings/emails** and set it with
+`git config --global user.email "..."`. Commits already made with the old form
+still attribute correctly — the numeric ID in front of the `+` is what GitHub
+matches on, and that never changes — so there is no need to rewrite history.
+
+### The repository has to be public
+
+A private repository will look fine to you and be broken for everyone else. The
+**Update** button fetches releases over the plain GitHub API and sends no
+password or token with the request, so against a private repository it simply
+gets "not found" — and so does anyone following a download link, including you
+when logged out.
+
+Check on the repository page: if there is a **Private** badge next to the name,
+go to **Settings** → **General** → scroll to the bottom → **Change repository
+visibility** → **Make public**.
 
 ## Step 9. Let the build robots write releases
 
@@ -281,7 +343,7 @@ repository's front page. You will have:
 | `robotrack-0.10.0-macos.dmg` | Mac users |
 | `robotrack-0.10.0-code.zip` | nobody directly — the **Update** button uses this |
 
-That link — `github.com/<your-username>/robotrack/releases/latest` — is what you
+That link — `github.com/Fettucciny/Biohybrid-Robot-Tracker/releases/latest` — is what you
 send people.
 
 ## Step 11. Point the app at the repository
@@ -289,7 +351,7 @@ send people.
 Open robotrack, go to **Settings**, and set the **update channel** to:
 
 ```
-github:<your-username>/robotrack
+github:Fettucciny/Biohybrid-Robot-Tracker
 ```
 
 (the literal word `github`, a colon, then your username and repo name — no
@@ -340,17 +402,17 @@ fix never arrived.
 | The `publish release` job fails with `403` | Step 9 was skipped. Fix the setting, then delete the tag and re-push it: `git tag -d v0.10.0; git push origin :v0.10.0; git tag v0.10.0; git push origin v0.10.0` |
 | `Tag v0.11.0 does not match __version__` | You tagged without bumping the version, or bumped without committing. |
 | `file is 130.00 MB; exceeds GitHub's limit` | Something excluded got committed. `git rm --cached` it, commit again. |
+| `GH007: Your push would publish a private email address` | Your commits are stamped with your real email and GitHub is set to block that. Set the no-reply address from Step 2, then restamp the commit you already made: `git config --global user.email "<no-reply address>"` then `git commit --amend --reset-author --no-edit` then push again. |
 
 ---
 
 # Part 2 — What to send other people
 
-Everything below is written to be forwarded as-is. Replace
-`<your-username>` with yours.
+Everything below is written to be forwarded as-is.
 
 > ## Installing robotrack
 >
-> Go to **https://github.com/\<your-username\>/robotrack/releases/latest** and
+> Go to **https://github.com/Fettucciny/Biohybrid-Robot-Tracker/releases/latest** and
 > download the file for your machine. You do not need Python, CUDA, ffmpeg or
 > anything else installed first — it is all inside.
 >
@@ -387,7 +449,7 @@ Everything below is written to be forwarded as-is. Replace
 > configured, open **Settings** and set the update channel to:
 >
 > ```
-> github:<your-username>/robotrack
+> github:Fettucciny/Biohybrid-Robot-Tracker
 > ```
 >
 > Updates are normally a few hundred kilobytes and apply in about a second — the
