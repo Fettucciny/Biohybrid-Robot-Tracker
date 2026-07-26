@@ -49,15 +49,22 @@ cd "$ROOT"
 SKIP_DMG=0
 DMG_ONLY=0
 CLEAN=0
-for arg in "$@"; do
-  case "$arg" in
-    --skip-dmg) SKIP_DMG=1 ;;
-    --dmg-only) DMG_ONLY=1 ;;
-    --clean)    CLEAN=1 ;;
-    -h|--help)  sed -n '3,10p' "$0"; exit 0 ;;
-    *) echo "unknown option: $arg" >&2; exit 2 ;;
-  esac
-done
+# Guarded by $#, not just written as `for arg in "$@"`. Under `set -u`, bash
+# versions before 4.4 -- which includes the 3.2 that macOS ships -- treat "$@"
+# as an unset variable when there are no positional parameters, and abort. CI
+# invokes this script with no arguments, so that is the normal case, not an
+# edge one.
+if [ $# -gt 0 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      --skip-dmg) SKIP_DMG=1 ;;
+      --dmg-only) DMG_ONLY=1 ;;
+      --clean)    CLEAN=1 ;;
+      -h|--help)  sed -n '3,10p' "$0"; exit 0 ;;
+      *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+  done
+fi
 
 step() { printf '\n\033[36m== %s ==\033[0m\n' "$1"; }
 warn() { printf '\033[33m%s\033[0m\n' "$1"; }
@@ -68,13 +75,16 @@ die()  { printf '\033[31m%s\033[0m\n' "$1" >&2; exit 1; }
 ARCH="$(uname -m)"                       # arm64 on Apple Silicon, x86_64 on Intel
 FF_ARCH="arm64"; [[ "$ARCH" == "x86_64" ]] && FF_ARCH="amd64"
 
-VERSION="$(python3 - <<'PY'
-import pathlib, re
-src = pathlib.Path("robotrack/__init__.py").read_text(encoding="utf-8")
-m = re.search(r'__version__\s*=\s*["\']([^"\']+)', src)
-print(m.group(1) if m else "0.0.0")
-PY
-)"
+# Read the version with grep and cut, not with a Python heredoc.
+#
+# macOS still ships bash 3.2.57 as /bin/bash -- Apple froze it in 2007 to avoid
+# GPLv3 -- and that parser cannot handle a here-document inside a command
+# substitution. The obvious `VERSION="$(python3 - <<PY ... PY)"` parses fine on
+# any modern bash and dies on a Mac with "unexpected EOF while looking for
+# matching )", pointing at the line where the $( opened rather than at the real
+# problem. Two plain commands in a pipe have no such trouble.
+VERSION="$(grep -m1 '^__version__' robotrack/__init__.py | cut -d'"' -f2)"
+[[ -n "$VERSION" ]] || die "Could not read __version__ from robotrack/__init__.py"
 
 APP="dist/robotrack.app"
 DMG="dist/robotrack-${VERSION}.dmg"
