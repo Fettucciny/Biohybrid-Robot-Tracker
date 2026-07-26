@@ -215,12 +215,12 @@ def _is_url(s: str) -> bool:
     return urlparse(str(s)).scheme in ("http", "https")
 
 
-def normalise_channel(spec: str) -> str:
+def normalize_channel(spec: str) -> str:
     return str(spec or "").strip().strip('"')
 
 
 def describe_channel(spec: str) -> str:
-    spec = normalise_channel(spec)
+    spec = normalize_channel(spec)
     if not spec:
         return "no update channel configured"
     if spec.lower().startswith("github:"):
@@ -318,7 +318,7 @@ def _releases_from_github(spec: str) -> list[Release]:
 
 def fetch_releases(spec: str) -> list[Release]:
     """All releases the channel offers, newest first."""
-    spec = normalise_channel(spec)
+    spec = normalize_channel(spec)
     if not spec:
         raise UpdateError("No update channel is configured. Set one in Settings.")
     try:

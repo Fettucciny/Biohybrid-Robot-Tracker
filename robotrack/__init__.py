@@ -1,8 +1,19 @@
-"""robotrack -- GPU video tracking for muscle-driven soft robots."""
+"""BioHybrid RoboTracker -- GPU-accelerated tracking of muscle-driven soft robots."""
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
-__all__ = ["probe", "VideoInfo", "RunConfig", "run", "Result", "__version__"]
+# The name shown to people, kept apart from the import name.
+#
+# The package stays ``robotrack`` on purpose. It is what the code-patch updater
+# ships a folder called, what every installed copy already has on sys.path, and
+# what the frozen executable is named -- renaming it would strand every existing
+# install on the version it happens to be running. Nothing user-facing uses the
+# import name, so the two can differ without anyone but a developer noticing.
+APP_NAME = "BioHybrid RoboTracker"
+APP_TAGLINE = "GPU-accelerated tracking for muscle-driven soft robots"
+
+__all__ = ["probe", "VideoInfo", "RunConfig", "run", "Result",
+           "APP_NAME", "APP_TAGLINE", "__version__"]
 
 # The public names resolve on first use rather than at import time.
 #

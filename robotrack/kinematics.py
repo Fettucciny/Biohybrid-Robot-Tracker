@@ -94,11 +94,11 @@ def derivative(values: np.ndarray, t: np.ndarray, info: VideoInfo,
 
 
 def path_length(cx: np.ndarray, cy: np.ndarray) -> np.ndarray:
-    """Cumulative distance travelled by the centroid.
+    """Cumulative distance traveled by the centroid.
 
     Note this is computed on *smoothed* coordinates upstream. Path length from
     raw per-frame positions is biased upward -- tracking jitter adds length that
-    the robot never travelled, and the bias grows with frame rate, so a 120 Hz
+    the robot never traveled, and the bias grows with frame rate, so a 120 Hz
     clip would report a longer path than a 30 Hz clip of the same motion.
     """
     d = np.sqrt(np.diff(cx) ** 2 + np.diff(cy) ** 2)

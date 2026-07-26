@@ -76,7 +76,7 @@ def _otsu_cpu(flat: torch.Tensor, bins: int) -> float:
 
 
 def dilate(x: torch.Tensor, k: int) -> torch.Tensor:
-    """Binary/greyscale dilation as a max-pool. x is (H,W) or (N,1,H,W) float."""
+    """Binary/grayscale dilation as a max-pool. x is (H,W) or (N,1,H,W) float."""
     single = x.dim() == 2
     t = x[None, None] if single else x
     t = F.max_pool2d(t, k, stride=1, padding=k // 2)

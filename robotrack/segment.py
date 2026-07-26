@@ -30,7 +30,7 @@ class SegmentConfig:
     open_px: int = 3                # speckle removal
     close_px: int = 7               # pinhole filling
     # 0.05% of the frame. The old 0.01% was tuned for a luma mask, where stray
-    # foreground is rare; a colour-keyed mask of a textured medium carries
+    # foreground is rare; a color-keyed mask of a textured medium carries
     # specks everywhere and the lower floor let them inflate the body.
     min_area_frac: float = 5e-4     # ignore blobs below this fraction of frame
     manual_threshold: float | None = None
@@ -39,13 +39,13 @@ class SegmentConfig:
 
     # --- how the robot is told apart from everything else ------------------
     # "luma"   difference from the median background plate, in brightness
-    # "colour" distance from the background's own colour, brightness ignored
-    # "auto"   measure the colour separation in this clip, then pick
+    # "color" distance from the background's own color, brightness ignored
+    # "auto"   measure the color separation in this clip, then pick
     mode: str = "auto"
-    colour_frac: float = 0.30       # cut this far along background -> robot colour
+    color_frac: float = 0.30       # cut this far along background -> robot color
     bg_chroma: tuple[float, float] | None = None      # (a, b), auto-estimated
     target_chroma: tuple[float, float] | None = None  # (a, b) of the robot
-    # Below this separation in a*b* units the two colours are too close to key
+    # Below this separation in a*b* units the two colors are too close to key
     # on and "auto" falls back to luma. The reference clip measures 84.
     min_separation: float = 20.0
     # The grouped mask may not exceed this multiple of the learned body extent.
@@ -54,37 +54,37 @@ class SegmentConfig:
     envelope_factor: float = 1.10
 
     @property
-    def needs_colour(self) -> bool:
-        return self.mode in ("colour", "auto")
+    def needs_color(self) -> bool:
+        return self.mode in ("color", "auto")
 
 
 # ---------------------------------------------------------------------------
-# Colour
+# Color
 #
 # Brightness is the unreliable channel here, which is why the original luma path
-# struggles: a translucent hydrogel over a coloured medium varies in luminance
+# struggles: a translucent hydrogel over a colored medium varies in luminance
 # with thickness, lighting and the camera's own exposure, and a pale interior can
 # read *brighter* than the part you want. Hue does not move with any of that.
 #
 # On the reference clip the medium sits at a*+41 b*-24 and the limbs at a*+24
-# b*+58 -- 84 units apart in chroma, against 26 levels of luma. Keying on colour
+# b*+58 -- 84 units apart in chroma, against 26 levels of luma. Keying on color
 # turns a marginal threshold into an obvious one, and needs no background plate
 # at all, which also removes the assumption that the robot moves far enough for
 # a median to see through it.
 # ---------------------------------------------------------------------------
 
 def chroma(frame_bgr: np.ndarray) -> np.ndarray:
-    """(H,W,2) float32 of CIELAB a*, b* -- colour with brightness divided out."""
+    """(H,W,2) float32 of CIELAB a*, b* -- color with brightness divided out."""
     return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)[..., 1:].astype(np.float32)
 
 
-def estimate_colours(frames_bgr, bins: int = 64
+def estimate_colors(frames_bgr, bins: int = 64
                      ) -> tuple[tuple[float, float], tuple[float, float], float]:
-    """Find the medium's colour and the robot's, from sample frames.
+    """Find the medium's color and the robot's, from sample frames.
 
     The medium fills most of every frame, so the densest cell of the a*b*
     histogram is the background by construction -- no assumption about which
-    colour it happens to be. The robot is then the far mode: the cell furthest
+    color it happens to be. The robot is then the far mode: the cell furthest
     from the background that still carries real mass, which rejects the sparse
     tail of specular highlights and compression noise.
 
@@ -109,25 +109,25 @@ def estimate_colours(frames_bgr, bins: int = 64
             float(np.hypot(*(tgt - ref))))
 
 
-def colour_distance(frame_bgr: np.ndarray, bg_ab) -> np.ndarray:
-    """Per-pixel distance from the background colour, in a*b* units."""
+def color_distance(frame_bgr: np.ndarray, bg_ab) -> np.ndarray:
+    """Per-pixel distance from the background color, in a*b* units."""
     d = chroma(frame_bgr) - np.asarray(bg_ab, np.float32)
     return np.sqrt((d * d).sum(-1))
 
 
-def segment_colour(frame_bgr: np.ndarray, cfg: SegmentConfig,
+def segment_color(frame_bgr: np.ndarray, cfg: SegmentConfig,
                    bg_ab, separation: float,
                    threshold: float | None = None) -> tuple[np.ndarray, float]:
-    """Colour-keyed mask, with no background plate involved.
+    """Color-keyed mask, with no background plate involved.
 
-    The cut is placed a fixed fraction of the way from the medium's colour to
+    The cut is placed a fixed fraction of the way from the medium's color to
     the robot's rather than by Otsu. Otsu assumes two comparable populations;
     here the robot is a few percent of the frame, so Otsu lands high and slices
     the body in half -- measured at 62-67% of the mask in the largest fragment,
     against 92-93% for the fractional cut.
     """
-    thr = float(threshold) if threshold is not None else cfg.colour_frac * separation
-    d = colour_distance(frame_bgr, bg_ab)
+    thr = float(threshold) if threshold is not None else cfg.color_frac * separation
+    d = color_distance(frame_bgr, bg_ab)
     m = (d > thr).astype(np.uint8)
     if cfg.open_px > 1:
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((cfg.open_px,) * 2, np.uint8))
@@ -229,7 +229,7 @@ def largest_component(mask_np: np.ndarray, min_area: float,
     keep = [main + 1]
 
     # Reach alone is not enough. It was tuned for a luma mask, where stray
-    # foreground is rare; a colour-keyed mask of a textured medium has specks
+    # foreground is rare; a color-keyed mask of a textured medium has specks
     # scattered everywhere, and "within one body length of the main blob" then
     # sweeps up the entire frame -- observed as a mask spanning all 438x778 px
     # from 13 fragments. So fragments are accepted nearest-first and only while
@@ -278,54 +278,54 @@ def largest_component(mask_np: np.ndarray, min_area: float,
 
 
 @dataclass
-class ColourModel:
+class ColorModel:
     """What "auto" decided, and why -- reported so the choice is never silent."""
-    mode: str                    # "luma" or "colour"
+    mode: str                    # "luma" or "color"
     bg_ab: tuple[float, float] | None
     target_ab: tuple[float, float] | None
     separation: float
     reason: str
 
     def summary(self) -> str:
-        if self.mode != "colour":
+        if self.mode != "color":
             return f"segmentation: luma — {self.reason}"
         a, b = self.bg_ab
         ta, tb = self.target_ab
-        return (f"segmentation: colour — medium a{a - 128:+.0f} b{b - 128:+.0f}, "
+        return (f"segmentation: color — medium a{a - 128:+.0f} b{b - 128:+.0f}, "
                 f"robot a{ta - 128:+.0f} b{tb - 128:+.0f}, "
                 f"separation {self.separation:.0f} — {self.reason}")
 
 
-def choose_colour_model(reader: FrameReader, cfg: SegmentConfig,
-                        n: int = 24) -> tuple[ColourModel, np.ndarray]:
-    """Decide between luma and colour keying, and return the sampled frames.
+def choose_color_model(reader: FrameReader, cfg: SegmentConfig,
+                        n: int = 24) -> tuple[ColorModel, np.ndarray]:
+    """Decide between luma and color keying, and return the sampled frames.
 
     Sampling is shared with the background plate so "auto" costs no extra decode.
     """
-    if not cfg.needs_colour:
-        return ColourModel("luma", None, None, 0.0, "selected explicitly"), \
+    if not cfg.needs_color:
+        return ColorModel("luma", None, None, 0.0, "selected explicitly"), \
             np.empty((0,), np.uint8)
 
-    colour_reader = FrameReader(reader.info, reader.backend,
+    color_reader = FrameReader(reader.info, reader.backend,
                                 scale=reader.scale, color=True)
-    frames = colour_reader.sample(n)
+    frames = color_reader.sample(n)
     if frames.size == 0:
-        return ColourModel("luma", None, None, 0.0,
-                           "no frames could be sampled for colour"), frames
+        return ColorModel("luma", None, None, 0.0,
+                           "no frames could be sampled for color"), frames
 
-    bg, tgt, sep = estimate_colours(frames)
+    bg, tgt, sep = estimate_colors(frames)
     if cfg.bg_chroma:
         bg = tuple(cfg.bg_chroma)
     if cfg.target_chroma:
         tgt = tuple(cfg.target_chroma)
         sep = float(np.hypot(tgt[0] - bg[0], tgt[1] - bg[1]))
 
-    if cfg.mode == "colour":
-        return ColourModel("colour", bg, tgt, sep, "selected explicitly"), frames
+    if cfg.mode == "color":
+        return ColorModel("color", bg, tgt, sep, "selected explicitly"), frames
     if sep >= cfg.min_separation:
-        return ColourModel("colour", bg, tgt, sep,
-                           "colours are well separated"), frames
-    return ColourModel("luma", bg, tgt, sep,
+        return ColorModel("color", bg, tgt, sep,
+                           "colors are well separated"), frames
+    return ColorModel("luma", bg, tgt, sep,
                        f"only {sep:.0f} a*b* units apart, not enough to key on"), frames
 
 
@@ -337,24 +337,24 @@ class Segmenter:
         self._thr_history: list[float] = []
         self._extent_px: float = 0.0   # learned body size, drives fragment reach
 
-        self.model, colour_samples = choose_colour_model(reader, cfg)
-        self.colour = self.model.mode == "colour"
+        self.model, color_samples = choose_color_model(reader, cfg)
+        self.color = self.model.mode == "color"
         self.background = None
 
-        if self.colour:
+        if self.color:
             # No background plate at all. That is not just a saving: the plate
             # assumes the robot vacates every pixel for more than half the clip,
             # and a robot that mostly sits still leaves a ghost of itself in the
-            # median. Colour keying has no such assumption.
+            # median. Color keying has no such assumption.
             self.source = FrameReader(reader.info, reader.backend,
                                       scale=reader.scale, color=True)
-            samples = colour_samples
+            samples = color_samples
         else:
             self.source = reader
             self.background, samples = build_background(reader, cfg, dev)
 
         # Seed the body size from frames already decoded, so the first frames
-        # are not analysed with a fragment reach of zero.
+        # are not analyzed with a fragment reach of zero.
         for f in samples[:: max(1, len(samples) // 12)] if len(samples) else []:
             mm = self._mask_of(f)
             _, _, c = largest_component(mm, self.min_area)
@@ -364,8 +364,8 @@ class Segmenter:
 
     def _mask_of(self, frame: np.ndarray) -> np.ndarray:
         """Raw mask for one frame, in whichever mode is active."""
-        if self.colour:
-            m, thr = segment_colour(frame, self.cfg, self.model.bg_ab,
+        if self.color:
+            m, thr = segment_color(frame, self.cfg, self.model.bg_ab,
                                     self.model.separation, self._thr)
             self._last_thr = thr
             return m
@@ -380,8 +380,8 @@ class Segmenter:
             # Freeze the threshold after a short burn-in. A per-frame Otsu drifts
             # when the robot is occluded (less foreground changes the histogram),
             # which would make the measured size depend on the occlusion. The
-            # colour cut is already frame-independent, so this only binds luma.
-            if self.cfg.manual_threshold is None and not self.colour:
+            # color cut is already frame-independent, so this only binds luma.
+            if self.cfg.manual_threshold is None and not self.color:
                 self._thr_history.append(self._last_thr)
                 if len(self._thr_history) == 30:
                     self._thr = float(np.median(self._thr_history))

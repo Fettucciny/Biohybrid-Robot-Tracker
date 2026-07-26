@@ -9,7 +9,7 @@ re-dial six parameters because they closed the window.
 
 **Named configs.** The same dictionary can be written to a ``.rtcfg`` file the
 user chooses. That is what makes a run reproducible across machines and months:
-one file that says exactly how a set of clips was analysed, alongside the data.
+one file that says exactly how a set of clips was analyzed, alongside the data.
 
 Both use one serialiser, so a config file is exactly the state the app restores.
 
@@ -53,7 +53,7 @@ DEFAULTS: dict[str, Any] = {
     "beam_leg_short_mm": 3.300,
     "beam_resting_index": 0,
     "last_lut_dir": "",
-    "view_mode_index": 0,           # 0 = video, 1 = colour distance
+    "view_mode_index": 1,           # 0 = video, 1 = color distance (b*)
     "output_dir": "",
     "last_video_dir": "",
     "last_dxf_dir": "",
@@ -67,8 +67,8 @@ DEFAULTS: dict[str, Any] = {
     "min_area_pct": 0.0500,
     "gap_factor": 1.0,
     "envelope_factor": 1.10,
-    "seg_mode_index": 0,            # 0 = auto, 1 = colour, 2 = luma
-    "colour_frac": 0.30,
+    "seg_mode_index": 0,            # 0 = auto, 1 = color, 2 = luma
+    "color_frac": 0.30,
     "background_frames": 60,
 
     # --- fitting ---------------------------------------------------------
@@ -104,11 +104,26 @@ DEFAULTS: dict[str, Any] = {
     "manual_pose": None,            # [tx, ty, theta, sx, sy] in full-resolution px
 
     # --- updates ---------------------------------------------------------
-    "update_channel": "",
-    "check_updates_on_start": False,
+    # The public repository, so a fresh install updates itself with no setup.
+    # Anyone on an offline rig overrides this with a folder path in Settings;
+    # nothing in the app cares which kind of channel it is pointed at.
+    "update_channel": "github:Fettucciny/Biohybrid-Robot-Tracker",
+    "check_updates_on_start": True,
+
+    # --- notifications ---------------------------------------------------
+    "sound_enabled": True,
 
     # --- window ----------------------------------------------------------
     "window_geometry": "",          # base64 QByteArray from saveGeometry()
+}
+
+
+# Keys that have been renamed. A ``.rtcfg`` saved by an older build is a record
+# of a real experiment and has to keep loading, so the old spelling is accepted
+# and mapped forward rather than silently dropped -- which is what would happen
+# otherwise, since DEFAULTS doubles as the whitelist. Old name on the left.
+RENAMED: dict[str, str] = {
+    "color_frac": "color_frac",
 }
 
 
@@ -117,10 +132,14 @@ def settings_path() -> Path:
 
 
 def merge(loaded: dict | None) -> dict:
-    """Defaults overlaid with whatever of ``loaded`` is recognised and sane."""
+    """Defaults overlaid with whatever of ``loaded`` is recognized and sane."""
     out = dict(DEFAULTS)
     if not isinstance(loaded, dict):
         return out
+    loaded = dict(loaded)
+    for old, new in RENAMED.items():
+        if old in loaded and new not in loaded:
+            loaded[new] = loaded.pop(old)
     for k, default in DEFAULTS.items():
         if k not in loaded:
             continue

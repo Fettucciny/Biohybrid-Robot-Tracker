@@ -179,7 +179,7 @@ class Result:
                 lines.append(
                     f"  WARNING          : fitted proportions {self.aspect_measured:.2f} "
                     f"vs {self.aspect_drawn:.2f} drawn ({100 * err:.0f}% out). The fit is "
-                    f"probably on part of the robot, not all of it — loosen the colour "
+                    f"probably on part of the robot, not all of it — loosen the color "
                     f"cut and check the outline.")
             else:
                 lines.append(f"  proportions      : {self.aspect_measured:.2f} vs "
@@ -200,7 +200,7 @@ class Result:
                 f"  length           : {t.length_um.min():.0f} .. {t.length_um.max():.0f} um"
                 if unit_um else
                 f"  length           : {t.length_px.min():.1f} .. {t.length_px.max():.1f} px",
-                f"  path travelled   : "
+                f"  path traveled    : "
                 + (f"{t.path_length_um.iloc[-1]:.0f} um" if unit_um
                    else f"{t.path_length.iloc[-1]:.2f} px"),
             ]
@@ -236,14 +236,14 @@ class RunAborted(RuntimeError):
 def _fit_signal(m, seg):
     """The continuous surface interior edges are found in.
 
-    In colour mode that is the distance from the medium's colour, which is where
+    In color mode that is the distance from the medium's color, which is where
     the internal boundaries actually live; in luma mode it is the frame itself.
     """
     if m.frame is None:
         return None
-    if getattr(seg, "colour", False) and seg.model.bg_ab is not None:
-        from .segment import colour_distance
-        return colour_distance(m.frame, seg.model.bg_ab)
+    if getattr(seg, "color", False) and seg.model.bg_ab is not None:
+        from .segment import color_distance
+        return color_distance(m.frame, seg.model.bg_ab)
     return m.frame if m.frame.ndim == 2 else cv2.cvtColor(m.frame, cv2.COLOR_BGR2GRAY)
 
 
@@ -295,10 +295,24 @@ def _scaled_seed(cfg: RunConfig, info: VideoInfo, reader: FrameReader) -> np.nda
     return p
 
 
+def output_dir(outdir: str | Path, video: str | Path) -> Path:
+    """Where one clip's results go: ``<outdir>/<video name>/``.
+
+    A flat output folder works for exactly one run. The second clip overwrites
+    tracking.csv, summary.png, run_info.json and overlay.mp4 without a word,
+    and since the file names carry no hint of which video produced them there
+    is no way to notice afterwards. Giving each clip its own folder named after
+    it makes a session's worth of runs accumulate instead of collide -- and it
+    is what lets the video queue mark a clip as already analyzed by asking
+    whether its folder exists.
+    """
+    return Path(outdir) / Path(str(video)).stem
+
+
 def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         should_abort=None) -> Result:
     t_start = time.time()
-    out = Path(cfg.outdir)
+    out = output_dir(cfg.outdir, cfg.video)
     out.mkdir(parents=True, exist_ok=True)
 
     info = probe(cfg.video)
@@ -397,7 +411,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     #
     # The assumption is checkable, so it is checked: the width's coefficient of
     # variation is computed and reported. If the width is in fact moving, that
-    # number says so instead of quietly biasing every micrometre in the output.
+    # number says so instead of quietly biasing every micrometer in the output.
     px_per_mm, src = cfg.px_per_mm, "user-supplied"
     width_cv = float("nan")
     width_med_px = float("nan")
@@ -463,7 +477,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     #
     # Aggressive thresholding shrinks the mask, and past a point the fit settles
     # on a *sub-region* of the robot rather than the robot. That failure looks
-    # excellent by every other measure -- on the reference clip at colour cut
+    # excellent by every other measure -- on the reference clip at color cut
     # 0.50 it reported 185/185 frames tracked and a width CV of 1.5% while
     # measuring one limb. Proportions are what give it away: the ratio of the two
     # fitted scales should match the drawing, and it does not.
@@ -570,8 +584,8 @@ def _plots(res: Result, path: Path, axis_ranges: dict | None = None) -> None:
     if len(panels) == 1:
         ax = [ax]
 
-    for a, (key, y, label, colour) in zip(ax, panels):
-        a.plot(t.t, y, lw=1.4, color=colour)
+    for a, (key, y, label, color) in zip(ax, panels):
+        a.plot(t.t, y, lw=1.4, color=color)
         a.set_ylabel(label)
         a.grid(alpha=0.18)
         if key == "conf":
@@ -594,7 +608,7 @@ def _plots(res: Result, path: Path, axis_ranges: dict | None = None) -> None:
             a.fill_between(t.t, *a.get_ylim(), where=t.occluded,
                            color=THEME["warn"], alpha=0.12, lw=0)
 
-    # The analysed region, with its numbers, so the figure carries the result
+    # The analyzed region, with its numbers, so the figure carries the result
     # rather than just the picture it was read from.
     sel = (axis_ranges or {}).get("selection")
     st = (axis_ranges or {}).get("selection_stats") or {}
@@ -638,7 +652,7 @@ def _overlay(info: VideoInfo, reader: FrameReader, t: pd.DataFrame,
              max_px: int = 960, progress=None, should_abort=None) -> None:
     """Draw the fitted outline over the video and re-encode.
 
-    This is a second full pass -- decode the whole clip again in colour, composite,
+    This is a second full pass -- decode the whole clip again in color, composite,
     and encode -- and at full 4K it dominates everything else in the run: about
     3.4 minutes per 930 frames against 13 seconds at 960 px. Since the overlay
     exists to confirm the fit followed the robot rather than to measure from, it

@@ -8,7 +8,7 @@ unknown fraction of the robot is hidden behind an obstacle.
 
 The method
 ----------
-Chamfer matching against a distance transform, optimised with a *bounded*
+Chamfer matching against a distance transform, optimized with a *bounded*
 robust kernel.
 
 For each frame we build ``D(x,y)`` = distance in pixels from any point to the
@@ -69,7 +69,7 @@ class FitConfig:
     allow_flip: bool = True
     recovery_conf: float = 0.55      # below this, re-seed from the mask instead of prev pose
     # Temporal prior. Muscle contraction is continuous, so a large frame-to-frame
-    # scale jump is far more likely to be a fitting artefact than real biology.
+    # scale jump is far more likely to be a fitting artifact than real biology.
     # This is what stops an occluded frame from reporting a nonsense size.
     scale_prior_weight: float = 0.35
     # Expressed as a strain *rate* rather than a per-frame fraction. A per-frame
@@ -124,7 +124,7 @@ def interior_edges(signal: np.ndarray, mask: np.ndarray,
     nothing to match against.
 
     The underlying image still shows them. Taking Canny edges of the
-    colour-distance surface recovers the internal boundaries the threshold threw
+    color-distance surface recovers the internal boundaries the threshold threw
     away, which is what makes the drawing's interior usable as extra evidence.
 
     Edges are restricted to the mask's neighbourhood: medium texture and the
@@ -215,7 +215,7 @@ def seed_from_mask(mask: np.ndarray, tpl: Template) -> tuple[float, float, float
 
     Matches centroid to centroid and the template's long axis to the mask's
     principal axis, with scales from the projected extents. Good enough that the
-    optimiser usually only has to polish it.
+    optimizer usually only has to polish it.
     """
     ys, xs = np.nonzero(mask)
     if xs.size < 10:
@@ -244,7 +244,7 @@ class ShapeFitter:
         when the robot is the only moving thing in frame. It is the wrong answer
         when there are two robots, a stray reflection, or a tether that segments
         as part of the body: the moments describe whatever the mask contains, and
-        the optimiser then converges confidently onto the wrong object. A pose
+        the optimizer then converges confidently onto the wrong object. A pose
         placed by hand in the preview says which one is the target.
 
         It is kept as a standing candidate rather than used only for frame zero,
@@ -356,7 +356,7 @@ class ShapeFitter:
         obs = torch.from_numpy(np.stack([xs, ys], 1).astype(np.float32)).to(self.dev.torch_device)
         opt = torch.optim.Adam([p], lr=cfg.lr)
 
-        # Scales live in log space during optimisation so they cannot go
+        # Scales live in log space during optimization so they cannot go
         # negative and so a 2x growth and a 2x shrink are equally reachable.
         s_lo, s_hi = 1 - cfg.max_scale_change, 1 + cfg.max_scale_change
         if self._base_scale is None:

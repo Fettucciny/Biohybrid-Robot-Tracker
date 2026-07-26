@@ -138,13 +138,19 @@ coll = COLLECT(
 # 1x image upscaled onto a Retina display, which is what an app without it gets.
 # ---------------------------------------------------------------------------
 if IS_MAC:
+    # The bundle is what appears in /Applications and the Dock, so it carries
+    # the display name. The executable inside stays "robotrack": that is what
+    # PyInstaller's EXE step named it, what the self-test invokes, and what the
+    # relaunch-after-update path re-opens.
     app = BUNDLE(
         coll,
-        name="robotrack.app",
+        name="BioHybrid RoboTracker.app",
         icon=str(SPEC_DIR / "robotrack.icns"),
         bundle_identifier="org.biohybridlab.robotrack",
         version=VERSION,
         info_plist={
+            "CFBundleName": "BioHybrid RoboTracker",
+            "CFBundleDisplayName": "BioHybrid RoboTracker",
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,

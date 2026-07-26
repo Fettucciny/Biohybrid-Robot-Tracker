@@ -5,7 +5,7 @@ Why this is worth a custom widget
 Automatic seeding reads the mask's own moments. That is correct when the robot
 is the only moving thing in frame, and wrong the moment it is not: a second
 robot in shot, a reflection off the dish, a tether or a bubble that segments as
-foreground. The moments then describe the union of all of it, the optimiser
+foreground. The moments then describe the union of all of it, the optimizer
 converges confidently onto that, and the numbers look plausible while measuring
 the wrong object.
 
@@ -88,12 +88,12 @@ class PreviewView(QLabel):
 
         self._drag: str | None = None   # None | "move" | "length" | "width" | "rotate"
         self._grab_offset = (0.0, 0.0)
-        self._colour = QColor("#FF5470")
+        self._color = QColor("#FF5470")
 
     # ---- content ---------------------------------------------------------
 
-    def set_accent(self, hex_colour: str) -> None:
-        self._colour = QColor(hex_colour)
+    def set_accent(self, hex_color: str) -> None:
+        self._color = QColor(hex_color)
 
     def set_frame(self, pixmap: QPixmap | None, image_size: tuple[int, int]) -> None:
         self._frame = pixmap
@@ -114,7 +114,7 @@ class PreviewView(QLabel):
         self.update()
 
     def default_pose(self) -> list[float] | None:
-        """A sensible starting placement: centred, upright, filling ~60% of frame."""
+        """A sensible starting placement: centered, upright, filling ~60% of frame."""
         w, h = self._image_size
         if not (w and h) or self.template is None:
             return None
@@ -170,26 +170,26 @@ class PreviewView(QLabel):
 
         # Dashed, so a placed outline never reads as a measured result. The
         # fitted outline the analysis produces is drawn solid.
-        pen = QPen(self._colour, 2.0, Qt.DashLine if self.editable else Qt.SolidLine)
+        pen = QPen(self._color, 2.0, Qt.DashLine if self.editable else Qt.SolidLine)
         pen.setCosmetic(True)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
         p.drawPolygon(poly)
 
-        centre = self._to_widget(self.pose[0], self.pose[1])
-        p.setBrush(self._colour)
+        center = self._to_widget(self.pose[0], self.pose[1])
+        p.setBrush(self._color)
         p.setPen(QPen(QColor("#0A0E16"), 1.0))
-        p.drawEllipse(centre, 3.5, 3.5)
+        p.drawEllipse(center, 3.5, 3.5)
 
         if not self.editable:
             return
 
         hs = self._handles()
-        p.setPen(QPen(self._colour, 1.4))
+        p.setPen(QPen(self._color, 1.4))
         p.setBrush(Qt.NoBrush)
         for name, pt in hs.items():
-            p.drawLine(centre, pt)
-        p.setBrush(self._colour)
+            p.drawLine(center, pt)
+        p.setBrush(self._color)
         p.setPen(QPen(QColor("#0A0E16"), 1.2))
         if "length" in hs:
             p.drawEllipse(hs["length"], HANDLE_R, HANDLE_R)

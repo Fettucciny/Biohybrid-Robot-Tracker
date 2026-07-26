@@ -86,7 +86,7 @@ FF_ARCH="arm64"; [[ "$ARCH" == "x86_64" ]] && FF_ARCH="amd64"
 VERSION="$(grep -m1 '^__version__' robotrack/__init__.py | cut -d'"' -f2)"
 [[ -n "$VERSION" ]] || die "Could not read __version__ from robotrack/__init__.py"
 
-APP="dist/robotrack.app"
+APP="dist/BioHybrid RoboTracker.app"
 DMG="dist/robotrack-${VERSION}.dmg"
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ make_dmg() {
   cp LICENSE "$stage/LICENSE.txt" 2>/dev/null || true
 
   rm -f "$DMG"
-  hdiutil create -volname "robotrack $VERSION" -srcfolder "$stage" \
+  hdiutil create -volname "BioHybrid RoboTracker $VERSION" -srcfolder "$stage" \
                  -ov -format UDZO -quiet "$DMG"
   rm -rf "$stage"
   [[ -f "$DMG" ]] || die "hdiutil reported success but $DMG does not exist."

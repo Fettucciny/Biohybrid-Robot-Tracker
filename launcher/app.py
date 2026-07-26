@@ -111,7 +111,7 @@ def _log_dir() -> Path:
 
     The obvious choice -- next to the executable -- is wrong inside a macOS
     .app installed to /Applications, which is not user-writable; the write
-    fails silently and the one artefact that would explain a launch failure
+    fails silently and the one artifact that would explain a launch failure
     never appears. Prefer the per-user data directory the updater already owns,
     and fall back to the executable's folder only if that is unavailable.
     """
@@ -130,7 +130,7 @@ def _crash(title: str, detail: str) -> int:
         app = QApplication.instance() or QApplication(sys.argv)
         box = QMessageBox()
         box.setIcon(QMessageBox.Critical)
-        box.setWindowTitle("robotrack")
+        box.setWindowTitle("BioHybrid RoboTracker")
         box.setText(title)
         box.setDetailedText(detail)
         box.exec()
@@ -208,10 +208,11 @@ def selftest() -> int:
 
     def _assets():
         from robotrack.splash import asset
-        missing = [n for n in ("splash.png", "robotrack.ico") if not asset(n).exists()]
+        want = ("splash.png", "robotrack.ico", "done.wav", "stopped.wav")
+        missing = [n for n in want if not asset(n).exists()]
         if missing:
             raise FileNotFoundError(f"missing bundled assets: {missing}")
-        return "splash.png, robotrack.ico"
+        return ", ".join(want)
     check("robotrack assets", _assets)
 
     text = "\n".join(log)

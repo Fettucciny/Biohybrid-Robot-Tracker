@@ -1,4 +1,4 @@
-# Publishing robotrack, and installing it
+# Publishing BioHybrid RoboTracker, and installing it
 
 **Part 1** is you, once, and it assumes you have never used git before —
 everything is spelled out. **Part 2** is text you can send to anyone who needs
@@ -200,7 +200,7 @@ git rm --cached -r .venv
 When the list looks right:
 
 ```powershell
-git commit -m "robotrack: GPU tracking for muscle-driven soft robots"
+git commit -m "BioHybrid RoboTracker: GPU-accelerated tracking for muscle-driven soft robots"
 ```
 
 The text after `-m` is the note attached to the snapshot. Git prints something
@@ -252,9 +252,9 @@ README displayed underneath them.
 
 ### If the push is rejected
 
-If you created the repository with "Add a README", a licence or a `.gitignore`
+If you created the repository with "Add a README", a license or a `.gitignore`
 ticked, GitHub already put a commit in it that your local copy has never seen,
-and git refuses to overwrite history it does not recognise:
+and git refuses to overwrite history it does not recognize:
 
 ```
 ! [rejected]  main -> main (fetch first)
@@ -387,7 +387,7 @@ knows about. If you have *added* a brand-new file, use `git add .` first.
 **The tag and `__version__` must match.** The first job in the workflow does
 nothing but compare them and fails the whole run if they disagree. That guard is
 there because the mistake it catches is silent and unpleasant: a release
-labelled 0.11.0 whose contents report 0.10.0 leaves every installed copy
+labeled 0.11.0 whose contents report 0.10.0 leaves every installed copy
 convinced it is already up to date, and nobody notices until someone asks why a
 fix never arrived.
 
@@ -410,7 +410,7 @@ fix never arrived.
 
 Everything below is written to be forwarded as-is.
 
-> ## Installing robotrack
+> ## Installing BioHybrid RoboTracker
 >
 > Go to **https://github.com/Fettucciny/Biohybrid-Robot-Tracker/releases/latest** and
 > download the file for your machine. You do not need Python, CUDA, ffmpeg or
@@ -423,12 +423,16 @@ Everything below is written to be forwarded as-is.
 >    click **More info**, then **Run anyway**. That warning means the installer
 >    has no paid code-signing certificate, not that anything was found in it.
 > 3. It installs for your user only, so it needs no administrator rights.
-> 4. Launch **robotrack** from the Start menu.
+> 4. Launch **BioHybrid RoboTracker** from the Start menu.
 >
 > ### macOS (Apple Silicon — M1 and later)
 >
+> There is a longer, click-by-click version of this in **MACOS-INSTALL.md** in
+> the repository, written for someone who has never installed anything this way.
+> Send that link instead if the four steps below are not enough.
+>
 > 1. Download `robotrack-<version>-macos.dmg`.
-> 2. Open it and drag **robotrack** onto the **Applications** folder.
+> 2. Open it and drag **BioHybrid RoboTracker** onto the **Applications** folder.
 > 3. The first launch will be refused: *"robotrack cannot be opened because the
 >    developer cannot be verified."* Right-click the app in Applications, choose
 >    **Open**, then **Open** again in the dialog. macOS remembers this
@@ -437,7 +441,7 @@ Everything below is written to be forwarded as-is.
 >    If you would rather clear it in one command, in Terminal:
 >
 >    ```bash
->    xattr -dr com.apple.quarantine /Applications/robotrack.app
+>    xattr -dr com.apple.quarantine "/Applications/BioHybrid RoboTracker.app"
 >    ```
 >
 >    Both routes do the same thing. The app is signed, just not with a paid

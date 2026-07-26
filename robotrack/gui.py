@@ -11,6 +11,7 @@ valid range, clicking opens the full explanation from paramhelp.py.
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -21,31 +22,35 @@ import cv2
 import numpy as np
 import torch
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPen,
+                           QPixmap)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QMainWindow, QMessageBox, QProgressBar,
-                               QPushButton, QScrollArea, QSizePolicy, QSlider,
-                               QSpinBox, QSplitter, QTextEdit, QVBoxLayout,
-                               QWidget)
+                               QListWidget, QListWidgetItem, QMainWindow,
+                               QMessageBox, QProgressBar, QPushButton,
+                               QScrollArea, QSizePolicy, QSlider, QSpinBox,
+                               QSplitter, QTextEdit, QVBoxLayout, QWidget)
 
 from . import settings as S
+from . import sound as snd
 from . import update as U
+from . import APP_NAME
 from .cad import Template, load_dxf, read_loops
 from .decode import FrameReader, select_backend
 from .gpu import get_device
 from .ingest import VideoInfo, probe
 from .kinematics import AnalysisConfig
 from .paramhelp import HELP
-from .pipeline import RunAborted, RunConfig, run
+from .pipeline import (RunAborted, RunConfig,
+                       output_dir as pipeline_output_dir, run)
 from .forcelut import LUTError, load_lut
 from .forcemodel import BeamForceModel
 from .placement import PreviewView
 from .plotpanel import PlotPanel
 from .register import FitConfig, ShapeFitter
-from .segment import (ColourModel, SegmentConfig, choose_colour_model, colour_distance,
-                      build_background, largest_component, segment_colour,
+from .segment import (ColorModel, SegmentConfig, choose_color_model, color_distance,
+                      build_background, largest_component, segment_color,
                       segment_frame)
 from .shape import measure_mask
 from .theme import ACCENT, C, Card, HelpBadge, apply as apply_theme, style_chip
@@ -66,9 +71,9 @@ def _hms(seconds: float) -> str:
     return f"{s // 60}m {s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
-def _bgr(hex_colour: str) -> tuple[int, int, int]:
-    """'#RRGGBB' -> OpenCV BGR, so overlay colours track the theme accent."""
-    h = hex_colour.lstrip("#")
+def _bgr(hex_color: str) -> tuple[int, int, int]:
+    """'#RRGGBB' -> OpenCV BGR, so overlay colors track the theme accent."""
+    h = hex_color.lstrip("#")
     return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
 
 
@@ -97,12 +102,12 @@ class LoadWorker(QThread):
             self.note.emit(f"decoder: {backend.name} — {backend.description}")
             reader = FrameReader(info, backend, scale=self.scale)
 
-            self.note.emit("measuring colour separation…")
-            model, _ = choose_colour_model(reader, self.seg)
+            self.note.emit("measuring color separation…")
+            model, _ = choose_color_model(reader, self.seg)
             self.note.emit(model.summary())
 
             bg = None
-            if model.mode != "colour":
+            if model.mode != "color":
                 # Only luma needs the median plate, and it is the expensive part.
                 self.note.emit(f"building background plate from "
                                f"{self.seg.n_background_frames} frames…")
@@ -127,7 +132,7 @@ class PreviewWorker(QThread):
         self.fitter = fitter
         self.view = view
 
-    def _frame(self, colour: bool):
+    def _frame(self, color: bool):
         """Decoded frame for this timestamp, from the cache when possible.
 
         Scrubbing revisits the same frames constantly -- nudging a parameter and
@@ -135,7 +140,7 @@ class PreviewWorker(QThread):
         an ffmpeg launch and a keyframe seek, so caching them is most of the
         responsiveness win.
         """
-        key = (round(self.t, 4), colour, self.reader.scale)
+        key = (round(self.t, 4), color, self.reader.scale)
         f = self.cache.get(key)
         if f is None:
             f = self.reader.read_at(self.t)
@@ -147,24 +152,24 @@ class PreviewWorker(QThread):
 
     def run(self):
         try:
-            colour = self.model is not None and self.model.mode == "colour"
-            frame = self._frame(colour)
+            color = self.model is not None and self.model.mode == "color"
+            frame = self._frame(color)
             if frame is None:
                 self.done.emit(None, "", "Could not decode a frame at that position.", None)
                 return
             dev = get_device(self.gpu)
             min_area = self.seg_cfg.min_area_frac * self.reader.width * self.reader.height
 
-            if colour:
-                m, thr = segment_colour(frame, self.seg_cfg, self.model.bg_ab,
+            if color:
+                m, thr = segment_color(frame, self.seg_cfg, self.model.bg_ab,
                                         self.model.separation,
                                         self.seg_cfg.manual_threshold)
                 if self.view == "chroma":
                     # What the segmenter actually sees: distance from the
-                    # medium's colour. The threshold is a horizontal cut through
+                    # medium's color. The threshold is a horizontal cut through
                     # this surface, so a mask that looks wrong is diagnosed here
                     # rather than guessed at from the photograph.
-                    d = colour_distance(frame, self.model.bg_ab)
+                    d = color_distance(frame, self.model.bg_ab)
                     scaled = np.clip(d / max(self.model.separation, 1e-6) * 255.0,
                                      0, 255).astype(np.uint8)
                     img = cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS)
@@ -188,7 +193,7 @@ class PreviewWorker(QThread):
                 tint[mask > 0] = _bgr(ACCENT)
                 img = cv2.addWeighted(img, 1.0, tint, 0.40, 0)
 
-            bits = [("dC" if colour else "thr") + f" {thr:.0f}", f"area {int(area)}px"]
+            bits = [("dC" if color else "thr") + f" {thr:.0f}", f"area {int(area)}px"]
             fitted = None
             if self.tpl is not None and mask.any():
                 # Reuse the caller's fitter when it still matches: building one
@@ -196,7 +201,7 @@ class PreviewWorker(QThread):
                 # doing that per keystroke was pure overhead.
                 fitter = self.fitter or ShapeFitter(self.tpl, self.fit_cfg, dev,
                                                     seed_pose=self.seed)
-                sig = (colour_distance(frame, self.model.bg_ab) if colour else
+                sig = (color_distance(frame, self.model.bg_ab) if color else
                        (frame if frame.ndim == 2 else
                         cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
                 pose = fitter.fit(mask, signal=sig)
@@ -247,10 +252,12 @@ class PlaybackWorker(QThread):
     frame = Signal(int, float, object, str)
     finished_at = Signal(int)
 
-    def __init__(self, reader, model, bg, seg_cfg, start_index, show_mask, gpu, fps):
+    def __init__(self, reader, model, bg, seg_cfg, start_index, show_mask, gpu, fps,
+                 view="video"):
         super().__init__()
         self.reader, self.model, self.bg, self.seg_cfg = reader, model, bg, seg_cfg
         self.start_index, self.show_mask, self.gpu = start_index, show_mask, gpu
+        self.view = view
         self.fps = max(float(fps), 1.0)
         self._stop = False
         self._last = start_index
@@ -260,7 +267,7 @@ class PlaybackWorker(QThread):
 
     def run(self):
         try:
-            colour = self.model is not None and self.model.mode == "colour"
+            color = self.model is not None and self.model.mode == "color"
             dev = get_device(self.gpu)
             min_area = self.seg_cfg.min_area_frac * self.reader.width * self.reader.height
             period = 1.0 / self.fps
@@ -271,11 +278,22 @@ class PlaybackWorker(QThread):
                 if i < self.start_index:
                     continue
                 self._last = i
-                if colour:
-                    m, thr = segment_colour(frame, self.seg_cfg, self.model.bg_ab,
+                if color:
+                    m, thr = segment_color(frame, self.seg_cfg, self.model.bg_ab,
                                             self.model.separation,
                                             self.seg_cfg.manual_threshold)
-                    img = frame.copy()
+                    # Playback follows the View selector rather than always
+                    # showing the photograph. Watching the chroma surface move
+                    # is how you see the cut about to fail -- the moment the
+                    # robot's distance from the medium dips toward the
+                    # threshold is visible here and invisible in the video.
+                    if self.view == "chroma":
+                        d = color_distance(frame, self.model.bg_ab)
+                        scaled = np.clip(d / max(self.model.separation, 1e-6) * 255.0,
+                                         0, 255).astype(np.uint8)
+                        img = cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS)
+                    else:
+                        img = frame.copy()
                 elif self.bg is not None:
                     gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     ft = torch.from_numpy(gray).to(dev.torch_device).float()
@@ -299,8 +317,13 @@ class PlaybackWorker(QThread):
                     # a tracker that lets go shows it here frames before the
                     # numbers do.
                     if contour is not None and len(contour) > 2:
+                        # White reads on a photograph but disappears against the
+                        # bright end of viridis, so the chroma view gets the
+                        # accent instead.
+                        line = _bgr(ACCENT) if self.view == "chroma" else (255, 255, 255)
                         cv2.polylines(img, [contour.astype(np.int32)], True,
-                                      (255, 255, 255), 1, cv2.LINE_AA)
+                                      line, 2 if self.view == "chroma" else 1,
+                                      cv2.LINE_AA)
                 # Drop frames rather than fall behind: playing at the clip's real
                 # rate matters more than showing every frame.
                 next_due += period
@@ -381,10 +404,31 @@ class RunWorker(QThread):
 # Main window
 # --------------------------------------------------------------------------
 
+class NoWheel(QObject):
+    """Swallows wheel events on value widgets.
+
+    A scroll over a long parameter sidebar passes across a dozen spin boxes and
+    combos on its way down, and Qt's default is for whichever one is under the
+    pointer to take the wheel and change its value. The damage is quiet: a
+    threshold moves by one, the preview re-renders, and there is nothing on
+    screen that says a number changed. Forwarding the event to the scroll area
+    instead keeps the gesture doing the one thing it was meant to do.
+
+    Widgets stay editable in every other way -- click, type, arrow keys, and the
+    wheel still works once a control has been deliberately clicked into focus.
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel and not obj.hasFocus():
+            event.ignore()
+            return True
+        return super().eventFilter(obj, event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, startup_warning: str | None = None):
         super().__init__()
-        self.setWindowTitle("robotrack — biohybrid robot tracking")
+        self.setWindowTitle(f"{APP_NAME} — muscle-driven soft robot tracking")
         self.resize(1480, 940)
         try:
             from .splash import asset
@@ -397,6 +441,8 @@ class MainWindow(QMainWindow):
         self.video: str | None = None
         self.dxf: str | None = None
         self.info: VideoInfo | None = None
+        self._split = None
+        self._queue: list = []
         self.reader: FrameReader | None = None
         self.background = None
         self.template: Template | None = None
@@ -404,7 +450,7 @@ class MainWindow(QMainWindow):
         self._preview: PreviewWorker | None = None
         self._pending = False
         self._startup_warning = startup_warning
-        self.model: ColourModel | None = None
+        self.model: ColorModel | None = None
         self._frame_cache: dict = {}
         self._fitter: ShapeFitter | None = None
         self._fitter_key = None
@@ -445,12 +491,10 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
         outer.addWidget(self._build_header())
 
-        split = QSplitter(Qt.Horizontal)
+        split = self._split = QSplitter(Qt.Horizontal)
         split.addWidget(self._build_sidebar())
         split.addWidget(self._build_viewer())
-        self.plots = PlotPanel()
-        self.plots.selectionAnalysed.connect(self._on_region)
-        split.addWidget(self.plots)
+        split.addWidget(self._build_plots_column())
         split.setStretchFactor(1, 1)
         split.setSizes([400, 700, 380])
         split.setHandleWidth(10)
@@ -461,6 +505,17 @@ class MainWindow(QMainWindow):
         bl.addWidget(split)
         outer.addWidget(body, 1)
         self.setCentralWidget(root)
+
+        # Apply the wheel guard to every value widget in one pass, after the
+        # whole tree exists, rather than remembering to do it at each of the
+        # thirty-odd construction sites.
+        self._nowheel = NoWheel(self)
+        for kind in (QSpinBox, QDoubleSpinBox, QComboBox, QSlider):
+            for wdg in root.findChildren(kind):
+                if wdg is self.slider:
+                    continue          # the scrubber is meant to take the wheel
+                wdg.installEventFilter(self._nowheel)
+                wdg.setFocusPolicy(Qt.StrongFocus)
 
         self._set_enabled(False)
         dev = get_device(True)
@@ -499,8 +554,20 @@ class MainWindow(QMainWindow):
         elif last:
             self._log(f"last video is no longer at {last}")
 
-        if self.state.get("check_updates_on_start") and self.state.get("update_channel"):
-            QTimer.singleShot(1200, lambda: self._check_updates(quiet=True))
+        # The launch check no longer opens anything. It used to call the update
+        # dialog with quiet=True, which still ran ``dlg.exec()`` -- so every
+        # launch after an update reopened the very window you had just finished
+        # with, reporting that you were up to date. Now it asks in the
+        # background and, if there is something to install, makes the Update
+        # button breathe. Noticing is left to you.
+        if (self.state.get("check_updates_on_start")
+                and self.state.get("update_channel")
+                and U.read_marker() is None):
+            # Bound to `self`, so Qt drops the pending call if the window is
+            # destroyed first. Without that the timer can still fire on a
+            # window that is already closing, starting a thread nothing will
+            # ever wait for -- which is a crash on exit rather than a leak.
+            QTimer.singleShot(1500, self, self._check_updates_quietly)
 
     # ---- chrome ----------------------------------------------------------
 
@@ -613,7 +680,7 @@ class MainWindow(QMainWindow):
         # -------------------------------------------------- segmentation
         c = Card("Segmentation")
         self.cmb_keying = QComboBox()
-        self.cmb_keying.addItems(["Auto", "Colour (a*b*)", "Brightness"])
+        self.cmb_keying.addItems(["Auto", "Color (a*b*)", "Brightness"])
         self.cmb_keying.currentIndexChanged.connect(self._reload_needed)
         c.add_row("Keying", self.cmb_keying, HELP["keying"])
 
@@ -621,7 +688,7 @@ class MainWindow(QMainWindow):
         self.spin_cfrac.setSingleStep(0.05); self.spin_cfrac.setValue(0.30)
         self.spin_cfrac.setDecimals(2)
         self.spin_cfrac.valueChanged.connect(self._on_param)
-        c.add_row("Colour cut", self.spin_cfrac, HELP["colour_frac"])
+        c.add_row("Color cut", self.spin_cfrac, HELP["color_frac"])
 
         self.spin_env = QDoubleSpinBox(); self.spin_env.setRange(1.0, 4.0)
         self.spin_env.setSingleStep(0.05); self.spin_env.setValue(1.10)
@@ -878,16 +945,10 @@ class MainWindow(QMainWindow):
         c.add_widget(rowu)
         v.addWidget(c)
 
-        self.btn_run = QPushButton("Run analysis")
-        self.btn_run.setProperty("primary", True)
-        self.btn_run.clicked.connect(self._run)
-        v.addWidget(self.btn_run)
-
-        self.bar = QProgressBar(); self.bar.setVisible(False); self.bar.setTextVisible(False)
-        v.addWidget(self.bar)
-
-        self.log = QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(120)
-        v.addWidget(self.log)
+        # Run, the progress bar and the log all live in the viewer column now.
+        # The button belongs next to the thing it acts on, and the log belongs
+        # under the picture it describes -- at the bottom of a long scrolling
+        # sidebar both were routinely off-screen at the moment they mattered.
         v.addStretch(1)
 
         scroll.setWidget(inner)
@@ -896,16 +957,219 @@ class MainWindow(QMainWindow):
 
     # ---- viewer ----------------------------------------------------------
 
+    # ---- plots column ----------------------------------------------------
+
+    VIDEO_SUFFIXES = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".mts", ".m2ts"}
+
+    def _build_plots_column(self) -> QWidget:
+        """Queue on top, plots in the middle, Next video at the bottom.
+
+        The queue exists because a session is a folder of clips, not one clip.
+        Re-opening a file dialog for each of twenty recordings -- and having to
+        remember which of them you already did -- is the real friction in a
+        day's analysis, and neither problem is visible from inside a single run.
+        """
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+
+        head = QWidget(); hh = QHBoxLayout(head)
+        hh.setContentsMargins(2, 0, 2, 0); hh.setSpacing(7)
+        hh.addWidget(QLabel("Videos in this folder"))
+        hh.addWidget(HelpBadge(HELP["video_queue"]))
+        hh.addStretch(1)
+        self.lbl_queue_count = QLabel(""); self.lbl_queue_count.setObjectName("Readout")
+        hh.addWidget(self.lbl_queue_count)
+        v.addWidget(head)
+
+        self.list_videos = QListWidget()
+        self.list_videos.setMaximumHeight(146)
+        self.list_videos.itemActivated.connect(self._on_queue_pick)
+        self.list_videos.itemClicked.connect(self._on_queue_pick)
+        v.addWidget(self.list_videos)
+
+        self.plots = PlotPanel()
+        self.plots.selectionAnalyzed.connect(self._on_region)
+        v.addWidget(self.plots, 1)
+
+        self.btn_next_video = QPushButton("Next video  →")
+        self.btn_next_video.setObjectName("Ghost")
+        self.btn_next_video.setToolTip(
+            "Load the next clip in this folder. Parameters and the CAD outline "
+            "are kept; the fit and the plots are cleared.")
+        self.btn_next_video.setEnabled(False)
+        self.btn_next_video.clicked.connect(self._next_video)
+        v.addWidget(self.btn_next_video)
+        return w
+
+    # ---- the video queue -------------------------------------------------
+
+    @staticmethod
+    def _natural_key(name: str):
+        """Sort IMG_2 before IMG_10, the way a file manager does.
+
+        A plain string sort puts IMG_10 first because "1" sorts before "2",
+        which scrambles exactly the numbered sequences a camera produces.
+        Splitting digit runs out and comparing them numerically is what people
+        mean by alphabetical here.
+        """
+        return [int(part) if part.isdigit() else part.lower()
+                for part in re.split(r"(\d+)", name)]
+
+    def _sibling_videos(self):
+        if not self.video:
+            return []
+        folder = Path(self.video).parent
+        try:
+            files = [q for q in folder.iterdir()
+                     if q.is_file() and q.suffix.lower() in self.VIDEO_SUFFIXES]
+        except OSError:
+            return []
+        return sorted(files, key=lambda q: self._natural_key(q.name))
+
+    def _is_analyzed(self, video) -> bool:
+        """Has this clip been run before? Answered by the output folder.
+
+        Cheap and honest: pipeline.run writes into <outdir>/<clip name>/, so the
+        folder's existence *is* the fact "there are results". No index to keep
+        in sync, and it stays correct when you delete a folder to redo one.
+        """
+        if not self.outdir:
+            return False
+        try:
+            return (Path(self.outdir) / video.stem).is_dir()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _dot_icon(color):
+        """A small filled or hollow dot, drawn rather than shipped as a file."""
+        pm = QPixmap(14, 14)
+        pm.fill(Qt.transparent)
+        pnt = QPainter(pm)
+        pnt.setRenderHint(QPainter.Antialiasing, True)
+        if color:
+            pnt.setBrush(QColor(color)); pnt.setPen(Qt.NoPen)
+            pnt.drawEllipse(3, 3, 8, 8)
+        else:
+            pen = QPen(QColor(C["line"])); pen.setWidth(1)
+            pnt.setPen(pen); pnt.setBrush(Qt.NoBrush)
+            pnt.drawEllipse(3, 3, 8, 8)
+        pnt.end()
+        return QIcon(pm)
+
+    def _refresh_queue(self):
+        vids = self._sibling_videos()
+        self._queue = vids
+        self.list_videos.blockSignals(True)
+        self.list_videos.clear()
+        try:
+            current = Path(self.video).resolve() if self.video else None
+        except OSError:
+            current = None
+        done = 0
+        for pth in vids:
+            item = QListWidgetItem(pth.name)
+            item.setData(Qt.UserRole, str(pth))
+            if self._is_analyzed(pth):
+                done += 1
+                item.setIcon(self._dot_icon(C["ok"]))
+                item.setToolTip("analyzed — results exist in the output folder")
+            else:
+                item.setIcon(self._dot_icon(None))
+                item.setToolTip("not analyzed yet")
+            self.list_videos.addItem(item)
+            try:
+                if current is not None and pth.resolve() == current:
+                    self.list_videos.setCurrentItem(item)
+            except OSError:
+                pass
+        self.list_videos.blockSignals(False)
+        self.lbl_queue_count.setText(f"{done}/{len(vids)} analyzed" if vids else "")
+        self.btn_next_video.setEnabled(self._next_index() is not None)
+
+    def _next_index(self):
+        vids = getattr(self, "_queue", [])
+        if not vids or not self.video:
+            return None
+        try:
+            here = Path(self.video).resolve()
+            idx = next(i for i, q in enumerate(vids) if q.resolve() == here)
+        except (StopIteration, OSError):
+            return None
+        return idx + 1 if idx + 1 < len(vids) else None
+
+    def _on_queue_pick(self, item):
+        path = item.data(Qt.UserRole)
+        if not path:
+            return
+        try:
+            same = Path(path).resolve() == Path(self.video or "").resolve()
+        except OSError:
+            same = False
+        if not same:
+            self._switch_video(path)
+
+    def _next_video(self):
+        i = self._next_index()
+        if i is None:
+            self._log("this is the last video in the folder.")
+            return
+        self._switch_video(str(self._queue[i]))
+
+    def _switch_video(self, path: str):
+        """Load another clip, keeping everything that is not about this clip.
+
+        Thresholds, the drawing, the force model and the output folder describe
+        the *experiment* and carry over; the fit, the manual placement and the
+        plotted results describe the *clip* and do not. Carrying a hand
+        placement across would seed the next fit at a position measured in a
+        different frame, which is worse than starting with no seed at all.
+        """
+        if getattr(self, "_running", False):
+            QMessageBox.information(
+                self, "Analysis running",
+                "Stop the current analysis before loading another video.")
+            return
+        self._stop_play()
+        self.video = path
+        self.state["last_video_dir"] = str(Path(path).parent)
+        self.lbl_video.setText(Path(path).name)
+        self._last_fit_pose = None
+        self.manual_pose = None
+        if hasattr(self, "chk_manual"):
+            self.chk_manual.setChecked(False)
+        self.plots.reset()
+        self._touch()
+        self._refresh_queue()
+        self._reload()
+
     def _build_viewer(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(9)
 
+        # Run sits above the picture, where it is always visible: an analysis is
+        # started and aborted while watching the frame, not while scrolled to
+        # the bottom of the parameter list.
+        runrow = QWidget(); rr = QHBoxLayout(runrow)
+        rr.setContentsMargins(2, 0, 2, 0); rr.setSpacing(9)
+        self.btn_run = QPushButton("Run analysis")
+        self.btn_run.setProperty("primary", True)
+        self.btn_run.clicked.connect(self._run)
+        self.btn_run.setMinimumHeight(34)
+        rr.addWidget(self.btn_run, 1)
+        self.bar = QProgressBar(); self.bar.setVisible(False); self.bar.setTextVisible(True)
+        self.bar.setMinimumHeight(34)
+        rr.addWidget(self.bar, 2)
+        v.addWidget(runrow)
+
         topbar = QWidget(); tb = QHBoxLayout(topbar)
         tb.setContentsMargins(2, 0, 2, 0); tb.setSpacing(8)
         self.cmb_view = QComboBox()
-        self.cmb_view.addItems(["Video", "Colour distance (b*)"])
+        self.cmb_view.addItems(["Video", "Color distance (b*)"])
         self.cmb_view.setFixedWidth(190)
         self.cmb_view.currentIndexChanged.connect(self._on_param)
         tb.addWidget(QLabel("View")); tb.addWidget(HelpBadge(HELP["view_mode"]))
@@ -957,14 +1221,18 @@ class MainWindow(QMainWindow):
         h2.addWidget(self.chk_mask); h2.addWidget(self.chk_fit)
         h2.addStretch(1); h2.addWidget(self.lbl_status)
         v.addWidget(bar2)
+
+        self.log = QTextEdit(); self.log.setReadOnly(True)
+        self.log.setMinimumHeight(110); self.log.setMaximumHeight(190)
+        v.addWidget(self.log)
         return w
 
     # ---- config assembly -------------------------------------------------
 
     def _seg_cfg(self) -> SegmentConfig:
         return SegmentConfig(
-            mode=["auto", "colour", "luma"][self.cmb_keying.currentIndex()],
-            colour_frac=self.spin_cfrac.value(),
+            mode=["auto", "color", "luma"][self.cmb_keying.currentIndex()],
+            color_frac=self.spin_cfrac.value(),
             envelope_factor=self.spin_env.value(),
             n_background_frames=self.spin_bg.value(),
             open_px=self.spin_open.value() | 1,
@@ -1023,7 +1291,7 @@ class MainWindow(QMainWindow):
             "gap_factor": spin(self.spin_gap),
             "envelope_factor": spin(self.spin_env),
             "seg_mode_index": combo(self.cmb_keying),
-            "colour_frac": spin(self.spin_cfrac),
+            "color_frac": spin(self.spin_cfrac),
             "dxf_scale": spin(self.spin_dxfscale),
             "known_width_mm": spin(self.spin_width),
             "use_features": check(self.chk_features),
@@ -1138,8 +1406,52 @@ class MainWindow(QMainWindow):
         self.state = self._collect_state()
         S.save_settings(self.state)
 
+    # Every QThread this window can have in flight. Qt calls abort() on the
+    # process if one of these is still running when it is destroyed, so they all
+    # have to be accounted for on the way out -- not just the ones that are
+    # obviously long-lived.
+    _WORKER_ATTRS = ("_player", "_matcher", "_update_check",
+                     "_loader", "_preview", "_runner")
+
+    def _shutdown_workers(self, ms: int = 2500):
+        """Stop every worker thread before Qt tears the window down.
+
+        This fixes a real crash on exit, and the path to it is ordinary: the app
+        reopens your last video at launch, which starts a loader thread that
+        probes decode backends by running ffmpeg. Close the window during those
+        few seconds -- which is exactly what you do if you opened it by mistake,
+        or realise you want a different folder -- and Qt destroys a running
+        QThread and aborts. The process dies with SIGABRT after the window has
+        already gone, so it reads as a crash with no cause.
+
+        Each worker is asked nicely first, waited for, and only then terminated.
+        Terminating mid-ffmpeg is not clean, but the alternative here is not a
+        clean shutdown -- it is a crash.
+        """
+        for name in self._WORKER_ATTRS:
+            t = getattr(self, name, None)
+            if not isinstance(t, QThread) or not t.isRunning():
+                continue
+            for stopper in ("abort", "stop"):
+                fn = getattr(t, stopper, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+            t.requestInterruption()
+            t.quit()
+            if not t.wait(ms):
+                t.terminate()
+                t.wait(500)
+
     def closeEvent(self, ev):
+        self._closing = True
         self._stop_play()
+        if getattr(self, "_pulse_timer", None) is not None:
+            self._pulse_timer.stop()
+        self._debounce.stop()
+        self._shutdown_workers()
         self._persist()
         super().closeEvent(ev)
 
@@ -1217,8 +1529,8 @@ class MainWindow(QMainWindow):
         """Re-read the drawing at the new scale.
 
         The scale is not cosmetic: the robot's width is the calibration ruler,
-        so a drawing at 5:1 detail scale makes every micrometre in the output
-        five times too large. Reloading immediately means the millimetre readout
+        so a drawing at 5:1 detail scale makes every micrometer in the output
+        five times too large. Reloading immediately means the millimeter readout
         below confirms the number against what you measured on the bench.
         """
         self._touch()
@@ -1464,7 +1776,7 @@ class MainWindow(QMainWindow):
 
     def _on_pose_dragged(self, pose):
         # Live: update only the cheap readout. Re-fitting on every mouse move
-        # would queue a decode and an optimisation per pixel of travel.
+        # would queue a decode and an optimization per pixel of travel.
         self.manual_pose = self._pose_to_full(pose)
         self._update_pose_readout()
         self.btn_place_clear.setEnabled(True)
@@ -1520,7 +1832,7 @@ class MainWindow(QMainWindow):
             r = st.get("wander_ratio", float("nan"))
             if np.isfinite(r) and r > 2.0:
                 bits.append(f"          path is {r:.1f}x the net rate — the centroid "
-                            f"is wandering more than the robot is travelling")
+                            f"is wandering more than the robot is traveling")
         self._log("\n".join(bits))
 
     def _on_run_frame(self, index: int, img):
@@ -1556,7 +1868,8 @@ class MainWindow(QMainWindow):
         self._player = PlaybackWorker(
             self.reader, self.model, self.background, self._seg_cfg(),
             self.slider.value(), self.chk_mask.isChecked(),
-            self.chk_gpu.isChecked(), self.info.measured_fps * self._speed())
+            self.chk_gpu.isChecked(), self.info.measured_fps * self._speed(),
+            view=self._view_mode())
         self._player.frame.connect(self._on_play_frame)
         self._player.finished_at.connect(self._on_play_end)
         self._player.start()
@@ -1634,6 +1947,7 @@ class MainWindow(QMainWindow):
     # ---- updates ---------------------------------------------------------
 
     def _check_updates(self, quiet: bool = False):
+        self._stop_update_pulse()
         channel = self.state.get("update_channel", "")
         if quiet and not channel:
             return
@@ -1645,6 +1959,84 @@ class MainWindow(QMainWindow):
             # interrupt if there is actually something to install.
             dlg.check()
         dlg.exec()
+
+    def _check_updates_quietly(self):
+        """Ask the channel whether anything is newer, without blocking or asking.
+
+        Does nothing once the window is on its way out: the answer would have
+        nowhere to go, and the thread carrying it would outlive the window.
+
+        Runs on a worker thread: a channel can be a GitHub API call, a network
+        share or a cloud-synced folder, and any of those can take seconds or
+        hang. Doing it on the GUI thread would freeze the window during launch,
+        which is the worst possible moment.
+        """
+        if getattr(self, "_closing", False):
+            return
+        spec = self.state.get("update_channel", "")
+
+        def work():
+            try:
+                return U.check(spec)
+            except Exception:
+                return None            # an unreachable channel is not an event
+
+        class _Check(QThread):
+            found = Signal(object)
+
+            def run(self):
+                self.found.emit(work())
+
+        self._update_check = _Check(self)
+        self._update_check.found.connect(self._on_update_found)
+        self._update_check.start()
+
+    def _on_update_found(self, rel):
+        if rel is None or getattr(self, "_closing", False):
+            return
+        self._pending_release = rel
+        self._log(f"update available: {rel.version} — press Update to install it.")
+        self.btn_update.setText(f"Update  {rel.version}")
+        self.btn_update.setToolTip(
+            f"Version {rel.version} is available. Click to review and install it.")
+        self._start_update_pulse()
+
+    def _start_update_pulse(self):
+        """Fade the Update button between its normal look and the accent.
+
+        A badge would be easy to miss on a window this dense, and a dialog is
+        what this feature exists to avoid. Motion in the corner is noticeable
+        without being modal, and it stops the moment the button is pressed.
+        """
+        self._pulse_phase = 0.0
+        if getattr(self, "_pulse_timer", None) is None:
+            self._pulse_timer = QTimer(self)
+            self._pulse_timer.timeout.connect(self._pulse_step)
+        self._pulse_timer.start(40)          # 25 fps is plenty for a slow fade
+
+    def _stop_update_pulse(self):
+        if getattr(self, "_pulse_timer", None) is not None:
+            self._pulse_timer.stop()
+        self.btn_update.setStyleSheet("")
+
+    def _pulse_step(self):
+        import math
+        self._pulse_phase = (self._pulse_phase + 0.045) % 1.0
+        # A raised cosine, so it eases at both ends instead of bouncing between
+        # two colors -- "breathing" rather than "blinking", which is the
+        # difference between noticeable and irritating.
+        t = 0.5 - 0.5 * math.cos(2 * math.pi * self._pulse_phase)
+        base, hot = QColor(C["line"]), QColor(ACCENT)
+        mix = QColor(
+            int(base.red() + (hot.red() - base.red()) * t),
+            int(base.green() + (hot.green() - base.green()) * t),
+            int(base.blue() + (hot.blue() - base.blue()) * t))
+        txt = QColor(
+            int(QColor(C["text"]).red() + (hot.red() - QColor(C["text"]).red()) * t),
+            int(QColor(C["text"]).green() + (hot.green() - QColor(C["text"]).green()) * t),
+            int(QColor(C["text"]).blue() + (hot.blue() - QColor(C["text"]).blue()) * t))
+        self.btn_update.setStyleSheet(
+            f"QPushButton#Ghost {{ border-color: {mix.name()}; color: {txt.name()}; }}")
 
     def _set_update_channel(self, channel: str):
         self.state["update_channel"] = channel
@@ -1695,6 +2087,7 @@ class MainWindow(QMainWindow):
             self.state["last_video_dir"] = str(Path(f).parent)
             self.lbl_video.setText(Path(f).name)
             self._touch()
+            self._refresh_queue()
             self._reload()
 
     def _pick_dxf(self):
@@ -1712,7 +2105,7 @@ class MainWindow(QMainWindow):
 
         A new drawing, or a different outline within one, invalidates any
         existing placement: the scale factors are expressed per template
-        millimetre, so carrying them across would silently mean a different size.
+        millimeter, so carrying them across would silently mean a different size.
         """
         same_file = path == (self.dxf or "")
         if loop_index is None:
@@ -1761,7 +2154,7 @@ class MainWindow(QMainWindow):
         except Exception:
             self.row_loop.setVisible(False)
             return
-        # Labelled at the drawing scale, not as drawn. Listing the raw numbers
+        # Labeled at the drawing scale, not as drawn. Listing the raw numbers
         # meant looking for "5.25 x 12.60" in a list that said "26.25 x 63.00"
         # and concluding the right outline was not there.
         k = self.spin_dxfscale.value() or 1.0
@@ -1823,12 +2216,12 @@ class MainWindow(QMainWindow):
         self.info, self.reader, self.background, self.model = info, reader, bg, model
         self._frame_cache.clear()
         self._fitter = None
-        # Colour keying reads BGR; luma reads gray. Decode what is actually used
+        # Color keying reads BGR; luma reads gray. Decode what is actually used
         # rather than decoding both.
-        if model is not None and model.mode == "colour":
+        if model is not None and model.mode == "color":
             self.reader = FrameReader(info, reader.backend, scale=reader.scale, color=True)
-        self.chip_key.setText("colour" if (model and model.mode == "colour") else "luma")
-        style_chip(self.chip_key, "ok" if (model and model.mode == "colour") else "")
+        self.chip_key.setText("color" if (model and model.mode == "color") else "luma")
+        style_chip(self.chip_key, "ok" if (model and model.mode == "color") else "")
         self.lbl_info.setText(info.summary())
         self._log(info.summary())
         self.chip_rate.setText(f"{info.nominal_fps:g} Hz · {info.n_frames} frames")
@@ -1836,6 +2229,8 @@ class MainWindow(QMainWindow):
         self.slider.setRange(0, max(info.n_frames - 1, 0))
         self.slider.setValue(0)
         self._set_enabled(True)
+        self._fit_viewer_to_video()
+        self._refresh_queue()
         self._sync_placement_ui()
         self._touch()
         self._render_preview()
@@ -1888,7 +2283,7 @@ class MainWindow(QMainWindow):
             {"mask": self.chk_mask.isChecked(), "fit": self.chk_fit.isChecked()},
             seed=seed, model=self.model, cache=self._frame_cache,
             fitter=self._fitter,
-            view="chroma" if self.cmb_view.currentIndex() == 1 else "video")
+            view=self._view_mode())
         self._preview.done.connect(self._preview_done)
         self._preview.start()
 
@@ -1910,6 +2305,41 @@ class MainWindow(QMainWindow):
             self._pending = False
             self._render_preview()
 
+    def _fit_viewer_to_video(self):
+        """Give the viewer column the width the frame actually wants.
+
+        The three panes start at a fixed 400/700/380 split, which is right for
+        nothing in particular: a portrait phone clip gets a wide pane with grey
+        margins either side, and a 4K landscape clip gets a letterboxed strip.
+        Sizing the middle pane to the frame's aspect ratio removes the wasted
+        space without taking any from the sidebar -- the plots give it up and
+        get it back, and they reflow happily.
+        """
+        if self.info is None or self._split is None:
+            return
+        h = max(self.view.height(), 200)
+        want = int(round(h * (self.info.width / max(self.info.height, 1))))
+        sizes = self._split.sizes()
+        if len(sizes) != 3:
+            return
+        total = sum(sizes)
+        # Never starve the other two: the sidebar keeps its width and the plots
+        # keep a floor, so a very wide clip stops growing rather than pushing
+        # the plot panel off the window.
+        want = max(420, min(want, total - sizes[0] - 300))
+        if abs(want - sizes[1]) < 24:
+            return
+        self._split.setSizes([sizes[0], want, total - sizes[0] - want])
+
+    def _view_mode(self) -> str:
+        """"video" or "chroma", from the View selector.
+
+        One place, because the preview worker and the playback worker both need
+        it and they used to derive it separately -- which is how playback ended
+        up ignoring the selector entirely.
+        """
+        return "chroma" if self.cmb_view.currentIndex() == 1 else "video"
+
     def _reset_run_button(self):
         self._running = False
         self.btn_run.setEnabled(True)
@@ -1923,6 +2353,7 @@ class MainWindow(QMainWindow):
         self.bar.setFormat("")
         self.plots.stop_live()
         self._reset_run_button()
+        snd.stopped(self.state.get("sound_enabled", True))
         self._log(f"aborted — {why}. No results were written.")
 
     def _run(self):
@@ -1944,6 +2375,10 @@ class MainWindow(QMainWindow):
             return
         self.outdir = out
         self._touch()
+        # The green dots are "a results folder exists under here", so they are
+        # only meaningful once "here" is known -- and they change wholesale when
+        # it changes.
+        self._refresh_queue()
         manual = (list(self.manual_pose)
                   if (self.manual_pose and self.chk_manual.isChecked()
                       and self.template is not None) else None)
@@ -2037,21 +2472,27 @@ class MainWindow(QMainWindow):
         self.plots.stop_live()
         self._reset_run_button()
         if err:
+            snd.stopped(self.state.get("sound_enabled", True))
             QMessageBox.critical(self, "Analysis failed", err)
             self._log(err.strip().splitlines()[-1])
             return
+        # Rising chime before the dialog, not after: the dialog blocks, and the
+        # whole point is to be heard by someone who has walked away from it.
+        snd.finished(self.state.get("sound_enabled", True))
         self._log(res.summary())
         # Swap the live raw trace for the gated, smoothed, calibrated table.
         um = (1000.0 / res.calibration_px_per_mm) if res.calibration_px_per_mm else None
         self.plots.set_table(res.table, um, "force_mn" in res.table)
         if um is None:
             self._log("no calibration — plots are in pixels. Load a DXF, or type "
-                      "the robot's true width in the Input card, to get micrometres.")
+                      "the robot's true width in the Input card, to get micrometers.")
         self._sync_placement_ui()
         self._persist()
+        # Refresh the dots: the clip that just finished now has a folder.
+        self._refresh_queue()
         box = QMessageBox(self)
         box.setWindowTitle("Analysis complete")
-        box.setText(f"Written to {self.outdir}")
+        box.setText(f"Written to {pipeline_output_dir(self.outdir, self.video)}")
         box.setDetailedText(res.summary())
         box.exec()
 

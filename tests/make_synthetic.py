@@ -9,7 +9,7 @@ checked against truth rather than merely eyeballed.
 The palette is not decorative. The analysis keys on *chroma* -- the a* and b*
 channels of CIELAB -- because in the real footage the robot and its culture
 medium differ by about 84 units of chroma and only about 26 of luma, which is
-what made grayscale thresholding fail. A neutral-grey fixture would therefore
+what made grayscale thresholding fail. A neutral-gray fixture would therefore
 test a path the software no longer takes, and would fail for reasons that say
 nothing about it. So the background is the medium's deep pink and the body is
 the tissue's orange-yellow, at roughly the separation the camera actually
@@ -43,23 +43,23 @@ OBSTACLE_X0 = 380                  # bar starts here, so the robot enters it mid
 # the camera actually delivers -- about 27 units of luma against 73 of chroma.
 # The low luma figure is the point: it is what makes a grayscale threshold fail
 # and a chroma key succeed, so a fixture that got it wrong by being obligingly
-# bright would pass whether or not the colour path worked.
+# bright would pass whether or not the color path worked.
 BG_BGR = (150, 70, 205)
 BODY_BGR = (45, 93, 115)
 EDGE_BGR = (34, 70, 92)
-# The occluder is a *shadow on the medium*, not a neutral-grey bar: same hue,
+# The occluder is a *shadow on the medium*, not a neutral-gray bar: same hue,
 # 46 CIELAB units darker. That is deliberately the harder and more honest case.
 # A neutral bar is maximally distant from a saturated pink in a*b*, so a chroma
 # key would treat it as the largest object in the frame and lock onto it -- a
 # failure of the fixture, not of the method. A same-hue shadow is invisible to
 # the chroma key while being glaring to a luma threshold, which is exactly the
-# asymmetry the colour path exists to exploit. It still removes robot pixels
+# asymmetry the color path exists to exploit. It still removes robot pixels
 # wherever it overlaps, so the occlusion test is unchanged.
 OBSTACLE_BGR = (98, 43, 135)          # == _shade(BG_BGR, 0.40)
 
 
 def _shade(bgr, k: float) -> tuple[int, int, int]:
-    """Scale an sRGB colour's brightness by ``k`` while holding its hue.
+    """Scale an sRGB color's brightness by ``k`` while holding its hue.
 
     Scaling the encoded bytes directly does not: sRGB is gamma-encoded, so a
     uniform multiply shifts chromaticity as well as brightness. Decoding to
@@ -74,7 +74,7 @@ def _shade(bgr, k: float) -> tuple[int, int, int]:
 
 
 def body_outline(n: int = 400) -> np.ndarray:
-    """Tapered ellipse-like body, in mm, centred, long axis = +y."""
+    """Tapered ellipse-like body, in mm, centered, long axis = +y."""
     th = np.linspace(0, 2 * np.pi, n, endpoint=False)
     y = (L0_MM / 2) * np.cos(th)
     taper = 1.0 - 0.35 * (np.abs(y) / (L0_MM / 2)) ** 2.2
@@ -84,7 +84,7 @@ def body_outline(n: int = 400) -> np.ndarray:
 
 def write_dxf(path: Path) -> None:
     doc = ezdxf.new()
-    doc.header["$INSUNITS"] = 4          # millimetres
+    doc.header["$INSUNITS"] = 4          # millimeters
     doc.modelspace().add_lwpolyline(body_outline(240), close=True)
     doc.saveas(str(path))
 
@@ -101,7 +101,7 @@ def render(outdir: Path, fps: float, seconds: float, size=(1280, 720),
     bg = (rng.normal(BG_BGR, 5, (H, W, 3))).clip(0, 255).astype(np.uint8)
     bg = cv2.GaussianBlur(bg, (0, 0), 3)
     for _ in range(60):
-        # Texture as *uneven illumination*, not as a second colour: each blob is
+        # Texture as *uneven illumination*, not as a second color: each blob is
         # the medium's own hue scaled in linear light, which changes brightness
         # by up to 40% and chromaticity by almost nothing. That is what real
         # lighting does, and it is the case the chroma key claims to be immune
@@ -136,7 +136,7 @@ def render(outdir: Path, fps: float, seconds: float, size=(1280, 720),
             occluded_now = False
             if occlude:
                 # Static, present in every frame: it joins the background
-                # plate in luma mode, and shares the medium's hue in colour
+                # plate in luma mode, and shares the medium's hue in color
                 # mode. Either way it removes robot pixels rather than being
                 # mistaken for robot.
                 cv2.rectangle(img, (OBSTACLE_X0, OBSTACLE_Y[0]), (W, OBSTACLE_Y[1]),

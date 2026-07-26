@@ -1,7 +1,11 @@
-# robotrack
+# BioHybrid RoboTracker
 
-GPU video tracking for muscle-driven soft robots. Windows and macOS, offline
-analysis of iPhone footage.
+GPU-accelerated tracking for muscle-driven soft robots. Windows and macOS, offline analysis of iPhone footage.
+
+> The Python package, the executable and the release files are all still named
+> `robotrack`. That is deliberate: it is the name every installed copy already
+> has on `sys.path` and the name the code-patch updater ships a folder called,
+> so renaming it would strand existing installs. Only the name you see changed.
 
 Measures, per frame: **outline**, **width**, **length**, **centroid trajectory** and
 **cumulative path length** — with a fit that survives partial occlusion and an
@@ -33,8 +37,11 @@ info**, then **Run anyway**. That warning is about the absence of a certificate,
 not about anything found in the file, and it stops appearing once enough people
 have run it.
 
-**macOS.** Open the `.dmg` and drag `robotrack` to Applications. The first
-launch will be refused with *"robotrack cannot be opened because the developer
+**macOS.** See **[MACOS-INSTALL.md](MACOS-INSTALL.md)** for a step-by-step
+version of this written for someone who has never used GitHub, Python or the
+Terminal. The short form: open the `.dmg` and drag **BioHybrid RoboTracker** to
+Applications. The first
+launch will be refused with *"BioHybrid RoboTracker cannot be opened because the developer
 cannot be verified"*: the build is ad-hoc signed, which is enough to execute on
 Apple Silicon, but it is not notarised with a paid Apple Developer ID.
 Right-click the app and choose **Open** once, then **Open** again in the dialog,
@@ -42,7 +49,7 @@ and macOS remembers the decision permanently. If you would rather clear it
 outright:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/robotrack.app
+xattr -dr com.apple.quarantine "/Applications/BioHybrid RoboTracker.app"
 ```
 
 Nothing about the application changes either way; this is Gatekeeper's response
@@ -113,10 +120,10 @@ what the app reports or what the update manifest says.
 
 ```bash
 ./build_macos.sh                 # full build + robotrack-<version>.dmg
-./build_macos.sh --dmg-only      # re-wrap an existing dist/robotrack.app
+./build_macos.sh --dmg-only      # re-wrap an existing dist/"BioHybrid RoboTracker.app"
 ```
 
-Produces `dist/robotrack.app` and a drag-to-Applications disk image. Same
+Produces `dist/"BioHybrid RoboTracker.app"` and a drag-to-Applications disk image. Same
 contract as the Windows build — Python, Qt, PyTorch and ffmpeg are all inside,
 and it finishes with `--selftest` so a packaging bug becomes a build error
 rather than an app that silently refuses to open.
@@ -134,7 +141,7 @@ what the hardware is.
 
 **Decoding does not touch the GPU at all.** Apple Silicon puts video decode on a
 separate media engine reached through VideoToolbox, and `robotrack.decode` asks
-for it first on Darwin. That split is genuinely favourable here: the media engine
+for it first on Darwin. That split is genuinely favorable here: the media engine
 chews through 4K HEVC while the GPU cores are busy fitting, so the two stages do
 not contend for the same silicon the way NVDEC-plus-CUDA very nearly does.
 
@@ -210,10 +217,10 @@ finished against the total, the current rate, and an estimate of time remaining.
 ### Command line
 
 ```powershell
-robotrack myclip.MOV --dxf robot.dxf -o results
-robotrack myclip.MOV --probe-only               # just report frame rate and timing
-robotrack myclip.MOV                            # markerless, no CAD
-robotrack x --dxf robot.dxf --list-outlines     # which curve in the drawing is the robot
+BioHybrid RoboTracker myclip.MOV --dxf robot.dxf -o results
+BioHybrid RoboTracker myclip.MOV --probe-only               # just report frame rate and timing
+BioHybrid RoboTracker myclip.MOV                            # markerless, no CAD
+BioHybrid RoboTracker x --dxf robot.dxf --list-outlines     # which curve in the drawing is the robot
 ```
 
 Outputs in `results/`: `tracking.csv` (per-frame table), `summary.png` (time
@@ -305,10 +312,10 @@ that fits confidently and measures the wrong thing.
 
 So `cad.py` stitches segments into loops by matching endpoints, discards
 rectangles that enclose most of the other geometry (sheet furniture is
-recognised structurally, not by size), and ranks what is left. Where more than
+recognized structurally, not by size), and ranks what is left. Where more than
 one candidate survives — as with `Legs.DXF`, which offers a 63 × 26 mm and a
 58 × 21 mm outline — the GUI shows an **Outline** chooser listing each with its
-real millimetre dimensions, and the CLI has `--list-outlines`. Checking the pick
+real millimeter dimensions, and the CLI has `--list-outlines`. Checking the pick
 is immediate: the chosen outline is what the placement overlay draws on the video.
 
 ### Placing the target by hand
@@ -373,11 +380,11 @@ Nothing else in the app knows which kind is in use, so moving the lab from a
 Nextcloud folder to GitHub is one string in Settings and no republishing.
 
 **`github:owner/repo` is the one to use once the repository exists.** It needs
-no manifest at all — the app reads the Releases API and recognises assets by
+no manifest at all — the app reads the Releases API and recognizes assets by
 filename: `*-code.zip` is a patch, `*setup*.exe` and `*.dmg` are full installers
 for their platforms. That is exactly what `.github/workflows/release.yml`
 attaches, so pushing a tag is the whole publishing step. Every machine that has
-ever installed robotrack, on either platform, then updates itself from the same
+ever installed BioHybrid RoboTracker, on either platform, then updates itself from the same
 place with no shared drive between them.
 
 The offline channels are not a lesser fallback — they are the answer for a rig
@@ -386,7 +393,7 @@ run `python tools/publish_update.py E:\robotrack-updates` once to write the
 manifest beside them, and point those machines at the drive.
 
 Updates come in two sizes, because the bundle is 3–4 GB and almost none of it
-changes. A **code** update ships only robotrack's own Python (~75 KB) and is
+changes. A **code** update ships only BioHybrid RoboTracker's own Python (~75 KB) and is
 extracted into a per-user overlay that `launcher/app.py` puts ahead of the
 bundled package on `sys.path` — applied in about a second, with the frozen
 interpreter and every heavy dependency untouched. A **full** update runs the Inno
@@ -420,10 +427,10 @@ Copy-Item tools\release-workflow.yml .github\workflows\release.yml
 
 git init -b main
 git add .
-git commit -m "robotrack: GPU tracking for muscle-driven soft robots"
+git commit -m "BioHybrid RoboTracker: GPU tracking for muscle-driven soft robots"
 
 # create the repo and push (needs the gh CLI: https://cli.github.com)
-gh repo create robotrack --public --source=. --remote=origin --push
+gh repo create BioHybrid RoboTracker --public --source=. --remote=origin --push
 ```
 
 Without `gh`, make an empty repository on github.com first and then:
@@ -462,7 +469,7 @@ half an hour, mostly PyTorch downloading.
 
 The first job it runs does nothing but check that the tag matches
 `__version__`, and fails the whole workflow if they disagree. That guard is
-there because the failure it prevents is nasty and quiet: a release labelled
+there because the failure it prevents is nasty and quiet: a release labeled
 0.10.0 whose contents report 0.9.1 leaves every installed copy convinced it is
 already up to date, and no one notices until someone asks why a fix never
 arrived.
@@ -477,9 +484,70 @@ would quietly undo the entire reason for the macOS build.
 
 ---
 
+## Working through a folder of clips
+
+A session is a folder of recordings, not one recording, and most of the friction
+in a day's analysis comes from that mismatch rather than from any single run.
+Three things address it.
+
+**Results go in their own folder.** Each run writes to
+`<output folder>/<video name>/` rather than straight into the output folder.
+Before, the second clip silently overwrote the first — same four filenames,
+nothing in them naming the video they came from, so there was no way to notice
+afterwards. Now a session accumulates.
+
+**The clips are listed beside the plots.** Opening one video lists every video
+in the same folder, sorted the way a file manager sorts: `IMG_2` before `IMG_10`,
+which is the order a camera actually produced them in. Click any of them to load
+it.
+
+**A green dot means "already run".** The dot is not a stored list that could go
+stale — it is read from the filesystem, and asks exactly one question: does
+`<output folder>/<clip name>/` exist? Delete a results folder to redo a clip and
+it goes hollow again immediately. What the dot cannot tell you is whether the
+run was any *good*; that is what the fit confidence is for.
+
+**Next video** below the plots walks down the list. It keeps everything that
+describes the experiment — thresholds, the drawing, the force model, the output
+folder — and clears everything that describes the clip: the fit, the plots and
+any manual placement. Manual placement is deliberately not carried over. A pose
+measured in one clip's frame is a *worse* starting guess in the next one than no
+guess at all, because the fit would begin confidently in the wrong place.
+
+### A sound when it finishes
+
+A 4K run takes long enough to walk away from, so one finishes with a short
+rising chime and one that fails or is aborted with a falling one. The two are
+distinguishable from another room, which is the whole point — otherwise you have
+to come back and read the log to find out which happened.
+
+No dependency was added for this. The obvious route is Qt Multimedia, but the
+frozen build deliberately excludes it — it pulls in a media backend and its
+helper processes for well over a hundred megabytes, which is a poor trade for
+half a second of audio. Instead each platform's own mechanism is used:
+`winsound` on Windows, `afplay` on macOS, `paplay` or `aplay` on Linux. Every
+path is best-effort and silent on failure; a machine with no audio device must
+not take a run down with it. Turn it off by unsetting **sound** in the settings
+file, or set `ROBOTRACK_NO_SOUND=1`.
+
+### Small things that stop mistakes
+
+The scroll wheel no longer changes parameter values. Scrolling down a long
+sidebar used to pass the pointer over a dozen spin boxes, and whichever one it
+was over took the wheel and changed — quietly, with nothing on screen to say a
+number had moved. The wheel now scrolls the panel; a control still takes the
+wheel once you have deliberately clicked into it.
+
+The **Update** button breathes when a new version is available. The launch check
+runs in the background and no longer opens the update window to tell you there
+is nothing to do — which is what it used to do on the very first launch after an
+update, reporting that you were up to date in the window you had just closed.
+
+---
+
 ## Working with real footage
 
-### Colour, not brightness
+### Color, not brightness
 
 The reference clip is orange limbs in a magenta medium. Measured on it:
 
@@ -490,18 +558,18 @@ The reference clip is orange limbs in a magenta medium. Measured on it:
 | CIELAB b* | −24 | +58 | **84 a\*b\* units** |
 
 Brightness barely separates them, and the robot's pale interior reads *brighter*
-than its limbs — which is why placing a luma threshold felt impossible. Colour
+than its limbs — which is why placing a luma threshold felt impossible. Color
 separates them by more than three times as much.
 
-So segmentation defaults to **colour keying**: the densest cell of the a\*b\*
+So segmentation defaults to **color keying**: the densest cell of the a\*b\*
 histogram is the medium (it fills most of every frame, so this needs no
-assumption about what colour it is), the far mode with real mass is the robot,
+assumption about what color it is), the far mode with real mass is the robot,
 and the cut sits a fraction of the way between them. `Auto` measures the
 separation in your clip and falls back to luma below 20 units; the header chip
 says which it chose and the log says why.
 
 Two consequences beyond the cleaner mask. There is **no background plate** in
-colour mode, so the assumption that the robot vacates every pixel for more than
+color mode, so the assumption that the robot vacates every pixel for more than
 half the clip disappears — a robot that mostly sits still no longer leaves a
 ghost of itself in the median. And opening a clip got much faster, because the
 plate was the slow part.
@@ -514,7 +582,7 @@ slices the body in half — 62–67% of the mask in the largest fragment against
 ### Fragment grouping needs an envelope
 
 Regrouping fragments across an occlusion gap by proximity alone was tuned for a
-luma mask, where stray foreground is rare. A colour-keyed mask of a textured
+luma mask, where stray foreground is rare. A color-keyed mask of a textured
 medium has specks everywhere, and "within one body length of the main blob" then
 sweeps up the whole frame — measured as a mask spanning all 438×778 px from 13
 fragments, and a fitted length of 950 px on a 778 px frame. Fragments are now
@@ -572,7 +640,7 @@ through `ffmpeg.run` / `ffmpeg.popen`, which set `CREATE_NO_WINDOW`.
 
 ---
 
-## Scale, micrometres and force
+## Scale, micrometers and force
 
 ### The robot's own width is the ruler
 
@@ -583,14 +651,14 @@ time. Paired with the width from the drawing it gives µm/px directly, per clip.
 
 The assumption is checkable, so it is checked. Width CV is computed and reported;
 on the reference clip it is **0.3%**, which is a rigid width. If it ever climbs,
-that line says so rather than quietly biasing every micrometre in the output.
+that line says so rather than quietly biasing every micrometer in the output.
 
 Width is therefore *not* plotted and not written to `tracking.csv` — it is the
 instrument, not a result, and a flat trace beside the thing that varies reads as
 a measurement that did nothing. Its median and CV go to `run_info.json`.
 
 **No drawing? Type the width.** The ruler only needs the robot's true width in
-millimetres, and the drawing is just the usual way to know it. The **True width**
+millimeters, and the drawing is just the usual way to know it. The **True width**
 field takes it directly, so markerless tracking calibrates too. Watch the width
 CV afterwards: the fitted width from a DXF measured 0.3% on the reference clip,
 while the markerless silhouette width measured 17.7% — same robot, and the CV is
@@ -607,7 +675,7 @@ The clean route skips the sheet entirely: **right-click the flat top face in the
 part and choose `Export to DXF/DWG`**. The face fixes the projection, geometry
 comes out at true size, and there is no border or title block to filter. Set
 `Tools > Options > Document Properties > Units` to MMGS first so the DXF header
-records millimetres.
+records millimeters.
 
 If you must go via a drawing, three things have to be right: sheet scale 1:1
 (`Sheet Properties`), view scale 1:1 (`View Properties > Use custom scale`), and
@@ -622,9 +690,9 @@ so one measured dimension is what settles it. `Legs.DXF` resolves to exactly
 
 **Drawing scale matters more than it looks.** `Legs.DXF` is at 5:1 detail scale:
 it measures 26.25 × 63.00 mm as drawn against a true 5.25 × 12.60 mm, so it needs
-**× 0.2**. Get that wrong and every micrometre is off by the same factor with
+**× 0.2**. Get that wrong and every micrometer is off by the same factor with
 nothing else looking wrong. The Drawing scale field shows the resulting
-millimetres as you type, so you can match it against the bench. At × 0.2 the
+millimeters as you type, so you can match it against the bench. At × 0.2 the
 reference clip calibrates to **26.45 µm/px**.
 
 Video metadata cannot supply this. The file does carry the optics — `iPhone 17
@@ -675,7 +743,7 @@ turns one into the other, checked numerically to **0.00%** across pull-ins from
 camera can actually measure: video from above gives the change in leg separation,
 not the out-of-plane bow of the beam.
 
-With E in pascals and every length in millimetres, `E·I/(l·L)` is Pa·mm² = 10⁻⁶ N,
+With E in pascals and every length in millimeters, `E·I/(l·L)` is Pa·mm² = 10⁻⁶ N,
 so **force comes out in micronewtons with no conversion factor** — the unit the
 literature reports (395 µN active, 534–1147 µN passive), and why `SampleForce.m`
 uses a peak prominence of 200 unscaled. Defaults are that file's values, and the
@@ -755,7 +823,7 @@ is printed beside each delta: two cycles is an anecdote, twenty is a measurement
 **Two speeds are reported, and the gap between them is the point.** The path
 slope is regressed on the cumulative path; the net rate is straight-line, start
 to finish, over the same window. Cumulative path only ever increases, so every
-wobble of the centroid adds distance the robot never travelled — with 0.6 px of
+wobble of the centroid adds distance the robot never traveled — with 0.6 px of
 centroid noise at 30 Hz the path slope measured **50.4 mm/min against a true 3.18
 mm/min**. Net displacement cannot do that. On the reference clip the ratio is a
 mild 1.2–1.3×; above about 2× it is flagged, because at that point the centroid
@@ -769,11 +837,11 @@ figure and recorded under `region_analysis` in `run_info.json`, so the number an
 the picture it came from stay together.
 
 The movement panel carries three curves: cumulative path, plus net x and net y.
-Path says how far the robot travelled; x and y say where it went, and the two
+Path says how far the robot traveled; x and y say where it went, and the two
 differ whenever it doubles back. Fit confidence reads as a percentage.
 
 The **View** control above the video switches between the photograph and the
-colour-distance surface the segmenter actually thresholds. A threshold problem is
+color-distance surface the segmenter actually thresholds. A threshold problem is
 obvious there and nearly invisible on the photograph. The tracked outline is drawn
 at all times — while scrubbing, during playback, and on every sixth frame during
 the analysis itself, so a tracker that lets go shows it long before the numbers do.
@@ -789,7 +857,7 @@ loops inside the outer boundary (`Legs.DXF` has two, at 74.5% and 27.8% of the
 body area) as extra points, making the fit over-determined. That is the point: it
 is what lets the threshold be tight.
 
-Interior edges come from the **colour-distance image, not the mask**. A binary
+Interior edges come from the **color-distance image, not the mask**. A binary
 mask has exactly one edge — its silhouette — and an aggressively thresholded one
 is a solid blob: measured on the reference clip, *zero* enclosed holes at any
 morphology setting. Canny edges of the chroma surface, restricted to the mask's
@@ -804,7 +872,7 @@ what the confidence gate means; interior agreement is reported separately.
 
 Measured on the reference clip, width CV (the calibration's own stability):
 
-| colour cut | silhouette only | + interior | interior points matched |
+| color cut | silhouette only | + interior | interior points matched |
 |---|---|---|---|
 | 0.30 | 3.79% | 5.41% | 28% |
 | 0.45 | 2.17% | **1.90%** | 19% |
@@ -819,7 +887,7 @@ when a drawing's inner loops do not correspond to anything the camera resolves.
 
 Thresholding harder shrinks the mask, and past a point the fit settles on a
 *sub-region* of the robot rather than the robot. This failure looks excellent by
-every other measure — at colour cut 0.50 the reference clip reported **185/185
+every other measure — at color cut 0.50 the reference clip reported **185/185
 frames tracked and a width CV of 1.5%** while measuring one limb.
 
 Proportions are what give it away, so they are now checked automatically: the
@@ -836,13 +904,13 @@ a tapered body contracting at 1.5 Hz (length ±12%, width ∓8%, as an
 incompressible muscle would), translating along a curved path, passing behind a
 static occluder that hides part of it. `tests/evaluate.py` scores the recovery.
 
-The fixture is coloured, not grey, and that is load-bearing. The analysis keys
-on chroma, so a neutral-grey clip would exercise a path the software no longer
+The fixture is colored, not gray, and that is load-bearing. The analysis keys
+on chroma, so a neutral-gray clip would exercise a path the software no longer
 takes by default. The generator therefore reproduces the real separation — about
 27 CIELAB units of luma against 73 of chroma — and makes the occluder a *shadow
-of the medium* rather than a grey bar: same hue, 46 units darker. A luma
+of the medium* rather than a gray bar: same hue, 46 units darker. A luma
 threshold sees that shadow as the largest object in the frame; the chroma key
-does not see it at all, which is precisely the asymmetry the colour path exists
+does not see it at all, which is precisely the asymmetry the color path exists
 to exploit. Its background texture is uneven illumination for the same reason.
 
 Measured on a 5 s clip, **76% of frames partially occluded**, CPU build:
@@ -860,10 +928,10 @@ Measured on a 5 s clip, **76% of frames partially occluded**, CPU build:
 Both frame rates recover the same physical answer — and the same calibration to
 two decimal places — which is the check that matters for feature 1.
 
-Read that table as one error, not six. Every millimetre figure is a pixel
+Read that table as one error, not six. Every millimeter figure is a pixel
 measurement divided by the recovered scale, and the scale is 5.5% high, so the
 centroid errors are almost exactly the calibration error and carry no
-independent information. The cause is edge placement: the colour cut sits 30% of
+independent information. The cause is edge placement: the color cut sits 30% of
 the way from the medium to the robot, which includes the blurred boundary pixels
 and hands back a body a few percent too wide. Running the same fit on a neutral
 fixture in luma mode returns 2.1% length MAE and −2.1% on scale, so this is the
@@ -872,13 +940,13 @@ threshold's edge bias rather than anything in the fit.
 What follows from that is a practical point rather than a caveat: **strain,
 frequency and force are unaffected, absolute size is not.** A uniform scale
 error divides out of every ratio, which is why length strain is right while
-length in micrometres is a few percent high. If you need absolute size to better
+length in micrometers is a few percent high. If you need absolute size to better
 than a few percent, calibrate against a ruler in the frame
-(`--px-per-mm`) rather than against the robot's own width, or raise the colour
+(`--px-per-mm`) rather than against the robot's own width, or raise the color
 fraction until the fitted proportions match the drawing's.
 
 Cumulative path length reads 10–12% high, because tracking jitter adds distance
-the robot never travelled — net displacement is the more robust locomotion
+the robot never traveled — net displacement is the more robust locomotion
 metric, and increasing `--smooth-ms` trades jitter for temporal resolution.
 
 These are synthetic-data numbers. Treat them as an upper bound on real-footage
@@ -889,7 +957,7 @@ Reproduce:
 
 ```bash
 python tests/make_synthetic.py --fps 120 --seconds 5 --outdir syn
-robotrack syn/synthetic_120fps.mp4 --dxf syn/robot.dxf -o out
+BioHybrid RoboTracker syn/synthetic_120fps.mp4 --dxf syn/robot.dxf -o out
 python tests/evaluate.py out/tracking.csv syn/truth_120.npy --seconds 5
 ```
 
@@ -918,7 +986,7 @@ Built on the shared **MEA Suite theme kit**, which is vendored unmodified as
 `robotrack/mea_theme.py`. The suite's rule is that neutrals, the indigo→teal
 window gradient, radii (card 12 px · button 8 px · field 6 px), typography and
 the parula colormap stay identical across programs, and **only the accent
-changes**. robotrack follows that, so it reads as a member of the family.
+changes**. BioHybrid RoboTracker follows that, so it reads as a member of the family.
 
 Its accent is **`#FF5470`, crimson-rose**, registered as `myo`. Chosen by
 measurement rather than by eye:
@@ -944,10 +1012,10 @@ To register the accent in your master kit, add one line to `ACCENTS` in
 `config\mea_theme.py`:
 
 ```python
-"myo": "#FF5470",     # robotrack - biohybrid muscle robots
+"myo": "#FF5470",     # BioHybrid RoboTracker - biohybrid muscle robots
 ```
 
-Nothing in robotrack hardcodes a palette hex; `robotrack/theme.py` pulls every
+Nothing in BioHybrid RoboTracker hardcodes a palette hex; `robotrack/theme.py` pulls every
 neutral from the kit and defines only the accent.
 
 ## Capture protocol
@@ -989,11 +1057,12 @@ robotrack/
   forcelut.py    Length,Force calibration curve -> force per frame
   plotpanel.py   live, zoomable plots beside the video
   splash.py      launch splash with real load progress
-  assets/        splash artwork and application icon
+  assets/        splash artwork, application icon, completion sounds
   settings.py    remembered session state and .rtcfg configuration files
   update.py      update channels, code-overlay patching, rollback
   updater_ui.py  the Update dialog
   ffmpeg.py      locates bundled or system ffmpeg/ffprobe
+  sound.py       completion / abort chimes, no extra dependency
   forcelut.py    Length,Force calibration curve -> force per frame
   forcemodel.py  Cvetkovic beam model: delta length -> force, in closed form
   theme.py       widget styling, the self-explaining help popups
@@ -1016,6 +1085,8 @@ tools/
 tests/
   make_synthetic.py   ground-truth clip generator
   evaluate.py         accuracy scoring
+MACOS-INSTALL.md click-by-click Mac install guide for non-technical users
+PUBLISHING.md    first-time git/GitHub walkthrough and release procedure
 LICENSE          GPL-3.0-or-later
 ```
 
@@ -1032,7 +1103,7 @@ time per frame : fit 210 ms (91%)  decode+segment 20 ms (9%)  live preview 0 ms 
 Two stages can dominate, and they fail differently.
 
 **The overlay video** is a second full pass — decode the whole clip again in
-colour, composite, re-encode — and it used to run *after* the reported elapsed
+color, composite, re-encode — and it used to run *after* the reported elapsed
 time with no progress, so it looked like a hang. At full 4K it measured about 3.4
 minutes per 930 frames against 13 seconds at 960 px. It is now written at 960 px
 on the longest side by default (`overlay_max_px`), reports progress, and is

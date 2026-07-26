@@ -15,7 +15,12 @@
   #define AppVersion "0.0.0"
 #endif
 
-#define AppName      "robotrack"
+; Display name only. AppId and the install folder deliberately keep the old
+; value: AppId is what makes this an in-place upgrade of an existing install
+; rather than a second copy alongside it, and the folder name is what the
+; frozen executable and the update overlay both already point at.
+#define AppName      "BioHybrid RoboTracker"
+#define AppFolder    "robotrack"
 #define AppPublisher "BioHybrid Lab"
 #define AppExe       "robotrack.exe"
 
@@ -24,7 +29,7 @@ AppId={{7C4B2E10-9D3A-4F51-9C2E-6A1B0D5E8F42}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\{#AppName}
+DefaultDirName={autopf}\{#AppFolder}
 DefaultGroupName={#AppName}
 OutputDir=..\dist
 OutputBaseFilename=robotrack-setup

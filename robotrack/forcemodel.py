@@ -36,7 +36,7 @@ through the leg length is the step that connects the two, and it is exactly what
 
 Units
 -----
-With ``E`` in pascals and every length in millimetres, ``E*I/(l*L)`` is
+With ``E`` in pascals and every length in millimeters, ``E*I/(l*L)`` is
 Pa*mm^2 = 1e-6 N, so **force comes out in micronewtons** with no conversion
 factor. That is the unit the literature reports these in -- 395 uN of active
 tension and 534-1147 uN of passive tension in the PNAS paper -- and it is why
@@ -67,7 +67,7 @@ class BeamForceModel:
     E_pa: float = 293e3            # Young's modulus of the beam material
     thickness_mm: float = 1.1      # beam thickness, in the bending direction
     beam_width_mm: float = 1.925   # beam width
-    L_mm: float = 8.25             # leg centre to leg centre
+    L_mm: float = 8.25             # leg center to leg center
     l_mm: float = 1.642            # beam neutral axis to muscle line of action
     leg_long_mm: float = 4.125     # legs are tapered; both ends are averaged
     leg_short_mm: float = 3.3

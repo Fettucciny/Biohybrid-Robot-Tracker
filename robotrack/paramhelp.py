@@ -19,7 +19,7 @@ HELP: dict[str, dict] = {
     # ---------------------------------------------------------------- input
     "video": {
         "title": "Video file",
-        "short": "The recording to analyse.",
+        "short": "The recording to analyze.",
         "what": "An iPhone .MOV or any file ffmpeg can read. Frame rate is measured "
                 "from the file's real timestamps rather than the declared rate, so "
                 "30, 60 and 120 Hz clips are handled automatically and no setting "
@@ -91,10 +91,10 @@ HELP: dict[str, dict] = {
     },
     "threshold": {
         "title": "Manual threshold",
-        "short": "Grey-level difference from background required to count as robot.",
+        "short": "Gray-level difference from background required to count as robot.",
         "what": "A pixel joins the mask when it differs from the background plate by "
-                "more than this many grey levels (0–255 scale).",
-        "range": "1 – 254 grey levels",
+                "more than this many gray levels (0–255 scale).",
+        "range": "1 – 254 gray levels",
         "default": "30",
         "guidance": [
             "Too low: background texture, reflections and shadows leak into the mask; "
@@ -224,7 +224,7 @@ HELP: dict[str, dict] = {
         "title": "Restarts",
         "short": "Independent starting poses tried in parallel each frame.",
         "what": "The fit is a non-convex search, so several starting guesses are "
-                "optimised simultaneously and the best is kept. All restarts are "
+                "optimized simultaneously and the best is kept. All restarts are "
                 "evaluated as one batched GPU operation, so 64 costs little more than "
                 "1 — which is what makes this affordable.",
         "range": "1 – 256",
@@ -257,7 +257,7 @@ HELP: dict[str, dict] = {
         "title": "Temporal smoothness prior",
         "short": "Resistance to sudden frame-to-frame size changes.",
         "what": "Muscle contraction is continuous, so a large jump in fitted size "
-                "between consecutive frames is more likely a fitting artefact than "
+                "between consecutive frames is more likely a fitting artifact than "
                 "real biology. Expressed as a strain rate per second, so it means the "
                 "same physical thing at 30 and at 120 Hz.",
         "range": "0 – 2 (0 disables)",
@@ -273,7 +273,7 @@ HELP: dict[str, dict] = {
         "title": "Maximum size change",
         "short": "Limit on how far the outline may stretch or shrink from nominal.",
         "what": "Bounds the fitted width and length scale factors relative to the "
-                "drawing's nominal size, preventing the optimiser from wandering into "
+                "drawing's nominal size, preventing the optimizer from wandering into "
                 "physically impossible solutions.",
         "range": "0.1 – 0.95 (fraction)",
         "default": "0.60 (±60%)",
@@ -297,7 +297,7 @@ HELP: dict[str, dict] = {
         "default": "100 ms",
         "guidance": [
             "Raise it to reduce tracking jitter, which otherwise inflates cumulative "
-            "path length by adding distance never travelled.",
+            "path length by adding distance never traveled.",
             "Keep it well under one contraction period, or you will flatten the "
             "contraction you are trying to measure. At 1.5 Hz (667 ms period), stay "
             "below roughly 150 ms.",
@@ -336,9 +336,9 @@ HELP: dict[str, dict] = {
         ],
     },
     "px_per_mm": {
-        "title": "Pixels per millimetre",
+        "title": "Pixels per millimeter",
         "short": "Spatial calibration. Leave at 0 to self-calibrate from the DXF.",
-        "what": "Converts pixel measurements to millimetres. Measure it from a ruler "
+        "what": "Converts pixel measurements to millimeters. Measure it from a ruler "
                 "placed in the plane of motion. At 0, and with a DXF loaded, it is "
                 "inferred from the drawing's known dimensions.",
         "range": "0 (auto) or 0.1 – 10000 px/mm",
@@ -399,30 +399,30 @@ HELP: dict[str, dict] = {
     },
     "keying": {
         "title": "Keying",
-        "short": "Whether the robot is found by colour or by brightness.",
+        "short": "Whether the robot is found by color or by brightness.",
         "what": "Brightness compares each frame against a median background plate. "
-                "Colour ignores brightness entirely and measures how far each pixel's "
+                "Color ignores brightness entirely and measures how far each pixel's "
                 "hue sits from the medium's own, in CIELAB a*b*. Auto measures the "
                 "separation in your clip and picks — and reports which it chose.",
-        "range": "Auto · Colour · Brightness",
+        "range": "Auto · Color · Brightness",
         "default": "Auto",
         "guidance": [
-            "Colour is the right answer for a coloured medium. On the reference clip "
+            "Color is the right answer for a colored medium. On the reference clip "
             "the pink gel and the orange limbs are 84 a*b* units apart but only 26 "
-            "grey levels apart, and a pale interior reads brighter than the limbs — "
+            "gray levels apart, and a pale interior reads brighter than the limbs — "
             "which is exactly why the brightness threshold was so hard to place.",
-            "Colour needs no background plate, so it also removes the assumption that "
+            "Color needs no background plate, so it also removes the assumption that "
             "the robot moves far enough for a median to see through it. A robot that "
             "mostly sits still leaves a ghost of itself in the plate.",
-            "Auto falls back to brightness when the colours are within 20 a*b* units, "
+            "Auto falls back to brightness when the colors are within 20 a*b* units, "
             "where there is nothing reliable to key on.",
             "Brightness remains the better choice for a genuinely monochrome scene.",
         ],
     },
-    "colour_frac": {
-        "title": "Colour cut",
-        "short": "Where between medium and robot colour the boundary sits.",
-        "what": "0 puts the cut on the medium's own colour and 1 puts it on the "
+    "color_frac": {
+        "title": "Color cut",
+        "short": "Where between medium and robot color the boundary sits.",
+        "what": "0 puts the cut on the medium's own color and 1 puts it on the "
                 "robot's, so lower includes more and higher includes less. The cut is "
                 "placed as a fraction rather than by Otsu because Otsu assumes two "
                 "populations of comparable size, and the robot is a few percent of "
@@ -433,7 +433,7 @@ HELP: dict[str, dict] = {
             "Raise it if medium texture or highlights are joining the mask.",
             "Lower it if the body is breaking into pieces — at 0.45 the reference clip "
             "kept only 65% of the mask in the largest fragment, against 92% at 0.30.",
-            "Only applies to colour keying; brightness uses the threshold below.",
+            "Only applies to color keying; brightness uses the threshold below.",
         ],
     },
     "envelope": {
@@ -459,7 +459,7 @@ HELP: dict[str, dict] = {
         "what": "Scale comes from the robot's own width: it is rigid while the "
                 "length contracts, so it is a known length present in every frame. "
                 "Normally the width is taken from the drawing; type a value here to "
-                "override it, or to get micrometres with no DXF at all.",
+                "override it, or to get micrometers with no DXF at all.",
         "range": "0 (use the drawing) – 10000 mm",
         "default": "from drawing",
         "guidance": [
@@ -476,14 +476,14 @@ HELP: dict[str, dict] = {
         "short": "Multiplier on the drawing's dimensions.",
         "what": "Scales the outline read from the DXF. Use it when the drawing is "
                 "at a detail scale, in the wrong units, or of a design that was "
-                "fabricated slightly larger or smaller than drawn. The millimetre "
+                "fabricated slightly larger or smaller than drawn. The millimeter "
                 "readout underneath shows the result, so you can dial it until it "
                 "matches what you measured on the bench.",
         "range": "0.0001 – 1000 ×",
         "default": "1",
         "guidance": [
             "This is not cosmetic. The robot's width is the calibration ruler, so a "
-            "drawing at 5:1 makes every micrometre in the output five times too large "
+            "drawing at 5:1 makes every micrometer in the output five times too large "
             "— and nothing else in the run would look wrong.",
             "Legs.DXF measures 26.25 × 63.00 mm as drawn against a true 5.25 × 12.60 mm, "
             "so it needs × 0.2.",
@@ -491,7 +491,7 @@ HELP: dict[str, dict] = {
             "width and press 'Set scale from true width'. A drawing at 5:1 and one in "
             "centimetres are indistinguishable from inside the file, so one measured "
             "dimension is what settles it.",
-            "The Outline list is labelled at this scale, so the dimensions there are "
+            "The Outline list is labeled at this scale, so the dimensions there are "
             "the real ones once the scale is right.",
             "Check the aspect ratio too: if the drawn ratio and the tracked ratio "
             "disagree, the problem is the chosen outline, not the scale.",
@@ -500,7 +500,7 @@ HELP: dict[str, dict] = {
     "force_method": {
         "title": "Force method",
         "short": "How the tracked length is turned into force.",
-        "what": "Two routes to the same number. A <b>simulated LUT</b> interpolates a Length–Force curve exported from a COMSOL model of your device: it carries whatever that simulation captured, including behaviour no closed-form expression describes, and its domain is whatever was simulated — lengths outside it are clamped rather than extrapolated. The <b>Cvetkovic Model</b> needs no simulation and no calibration run, computing force analytically from the robot's geometry and material.<br><br>The Cvetkovic model computes force from the robot's own mechanics rather than from a calibration. A muscle ring anchored below the beam contracts and pulls the leg tips together; the legs rotate as rigid links about their bases, that rotation is imposed on the ends of the compliant beam, and the beam's bending stiffness is what resists. Read backwards, the pull-in measured on video gives the force that caused it.<br><br><b>&nbsp;&nbsp;I = t³·w / 12</b><br><b>&nbsp;&nbsp;θ = asin( (δ/2) / L_leg )</b><br><b>&nbsp;&nbsp;M = 2·E·I·θ / L</b><br><b>&nbsp;&nbsp;F = M / l = 2·E·I·θ / (l·L)</b><br><br><b>δ</b> is the shortening from rest — the resting leg separation minus the separation now — and is the only quantity that comes from the video; everything else is fixed geometry or material. <b>L_leg</b> is the average leg length, and dividing the pull-in between the two legs and taking the arcsine converts a horizontal displacement into the angle each leg has swung through. <b>t</b> is the beam thickness in the bending direction and <b>w</b> its width; together they give <b>I</b>, the second moment of area, which is how strongly the cross-section resists bending — note it goes as the <i>cube</i> of thickness. <b>E</b> is Young's modulus of the hydrogel the beam is cast from, the material's intrinsic stiffness. <b>L</b> is the span that bends, measured leg centre to leg centre, and appears because a longer beam rotates further for the same moment. <b>M</b> is that moment: the beam's elastic reaction to being rotated by θ at both ends. <b>l</b> is the moment arm — the perpendicular distance from the beam's neutral axis down to the muscle's line of action — and converts the moment back into the force <b>F</b> that produced it.<br><br>Cvetkovic et al. (PNAS 2014) write the same physics as P = 8·E·I·δ_max/(l·L²), in terms of the beam's transverse mid-span deflection δ_max rather than the leg rotation. The two are algebraically identical — substituting δ_max = θ·L/4 turns one into the other, verified numerically to 0.00% across pull-ins from 0.05 to 1.5 mm. The rotation form is used here because it takes the quantity a top-down camera can actually measure.<br><br>With E in pascals and every length in millimetres, E·I/(l·L) evaluates to Pa·mm² = 10⁻⁶ N, so <b>force emerges in micronewtons with no conversion factor</b> — the unit this literature reports, against roughly 395 µN of active tension and 534–1147 µN of passive tension in that paper.<br><br>Two sensitivities are worth carrying in mind. Force is <i>directly proportional to E</i>, and a cast hydrogel's modulus varies between batches and drifts in culture, which makes it the least certain quantity in the calculation; because it enters linearly, a force can be rescaled afterwards without re-tracking. And because I depends on t³, a ten percent error in a callipered thickness becomes a thirty-three percent error in force.<br><br>Running the two against each other is worthwhile: agreement is real evidence, while a systematic offset almost always points at the modulus, since force scales linearly with it.",
+        "what": "Two routes to the same number. A <b>simulated LUT</b> interpolates a Length–Force curve exported from a COMSOL model of your device: it carries whatever that simulation captured, including behavior no closed-form expression describes, and its domain is whatever was simulated — lengths outside it are clamped rather than extrapolated. The <b>Cvetkovic Model</b> needs no simulation and no calibration run, computing force analytically from the robot's geometry and material.<br><br>The Cvetkovic model computes force from the robot's own mechanics rather than from a calibration. A muscle ring anchored below the beam contracts and pulls the leg tips together; the legs rotate as rigid links about their bases, that rotation is imposed on the ends of the compliant beam, and the beam's bending stiffness is what resists. Read backwards, the pull-in measured on video gives the force that caused it.<br><br><b>&nbsp;&nbsp;I = t³·w / 12</b><br><b>&nbsp;&nbsp;θ = asin( (δ/2) / L_leg )</b><br><b>&nbsp;&nbsp;M = 2·E·I·θ / L</b><br><b>&nbsp;&nbsp;F = M / l = 2·E·I·θ / (l·L)</b><br><br><b>δ</b> is the shortening from rest — the resting leg separation minus the separation now — and is the only quantity that comes from the video; everything else is fixed geometry or material. <b>L_leg</b> is the average leg length, and dividing the pull-in between the two legs and taking the arcsine converts a horizontal displacement into the angle each leg has swung through. <b>t</b> is the beam thickness in the bending direction and <b>w</b> its width; together they give <b>I</b>, the second moment of area, which is how strongly the cross-section resists bending — note it goes as the <i>cube</i> of thickness. <b>E</b> is Young's modulus of the hydrogel the beam is cast from, the material's intrinsic stiffness. <b>L</b> is the span that bends, measured leg center to leg center, and appears because a longer beam rotates further for the same moment. <b>M</b> is that moment: the beam's elastic reaction to being rotated by θ at both ends. <b>l</b> is the moment arm — the perpendicular distance from the beam's neutral axis down to the muscle's line of action — and converts the moment back into the force <b>F</b> that produced it.<br><br>Cvetkovic et al. (PNAS 2014) write the same physics as P = 8·E·I·δ_max/(l·L²), in terms of the beam's transverse mid-span deflection δ_max rather than the leg rotation. The two are algebraically identical — substituting δ_max = θ·L/4 turns one into the other, verified numerically to 0.00% across pull-ins from 0.05 to 1.5 mm. The rotation form is used here because it takes the quantity a top-down camera can actually measure.<br><br>With E in pascals and every length in millimeters, E·I/(l·L) evaluates to Pa·mm² = 10⁻⁶ N, so <b>force emerges in micronewtons with no conversion factor</b> — the unit this literature reports, against roughly 395 µN of active tension and 534–1147 µN of passive tension in that paper.<br><br>Two sensitivities are worth carrying in mind. Force is <i>directly proportional to E</i>, and a cast hydrogel's modulus varies between batches and drifts in culture, which makes it the least certain quantity in the calculation; because it enters linearly, a force can be rescaled afterwards without re-tracking. And because I depends on t³, a ten percent error in a callipered thickness becomes a thirty-three percent error in force.<br><br>Running the two against each other is worthwhile: agreement is real evidence, while a systematic offset almost always points at the modulus, since force scales linearly with it.",
     },
     "beam_E": {
         "title": "Young's modulus",
@@ -510,7 +510,7 @@ HELP: dict[str, dict] = {
     "beam_geom": {
         "title": "Beam geometry",
         "short": "The dimensions the bending calculation is built from.",
-        "what": "These are the fixed terms of the force equation, all measured on the fabricated part rather than taken from the drawing.<br><br>The Cvetkovic model computes force from the robot's own mechanics rather than from a calibration. A muscle ring anchored below the beam contracts and pulls the leg tips together; the legs rotate as rigid links about their bases, that rotation is imposed on the ends of the compliant beam, and the beam's bending stiffness is what resists. Read backwards, the pull-in measured on video gives the force that caused it.<br><br><b>&nbsp;&nbsp;I = t³·w / 12</b><br><b>&nbsp;&nbsp;θ = asin( (δ/2) / L_leg )</b><br><b>&nbsp;&nbsp;M = 2·E·I·θ / L</b><br><b>&nbsp;&nbsp;F = M / l = 2·E·I·θ / (l·L)</b><br><br><b>δ</b> is the shortening from rest — the resting leg separation minus the separation now — and is the only quantity that comes from the video; everything else is fixed geometry or material. <b>L_leg</b> is the average leg length, and dividing the pull-in between the two legs and taking the arcsine converts a horizontal displacement into the angle each leg has swung through. <b>t</b> is the beam thickness in the bending direction and <b>w</b> its width; together they give <b>I</b>, the second moment of area, which is how strongly the cross-section resists bending — note it goes as the <i>cube</i> of thickness. <b>E</b> is Young's modulus of the hydrogel the beam is cast from, the material's intrinsic stiffness. <b>L</b> is the span that bends, measured leg centre to leg centre, and appears because a longer beam rotates further for the same moment. <b>M</b> is that moment: the beam's elastic reaction to being rotated by θ at both ends. <b>l</b> is the moment arm — the perpendicular distance from the beam's neutral axis down to the muscle's line of action — and converts the moment back into the force <b>F</b> that produced it.<br><br>Cvetkovic et al. (PNAS 2014) write the same physics as P = 8·E·I·δ_max/(l·L²), in terms of the beam's transverse mid-span deflection δ_max rather than the leg rotation. The two are algebraically identical — substituting δ_max = θ·L/4 turns one into the other, verified numerically to 0.00% across pull-ins from 0.05 to 1.5 mm. The rotation form is used here because it takes the quantity a top-down camera can actually measure.<br><br>With E in pascals and every length in millimetres, E·I/(l·L) evaluates to Pa·mm² = 10⁻⁶ N, so <b>force emerges in micronewtons with no conversion factor</b> — the unit this literature reports, against roughly 395 µN of active tension and 534–1147 µN of passive tension in that paper.<br><br>Two sensitivities are worth carrying in mind. Force is <i>directly proportional to E</i>, and a cast hydrogel's modulus varies between batches and drifts in culture, which makes it the least certain quantity in the calculation; because it enters linearly, a force can be rescaled afterwards without re-tracking. And because I depends on t³, a ten percent error in a callipered thickness becomes a thirty-three percent error in force.",
+        "what": "These are the fixed terms of the force equation, all measured on the fabricated part rather than taken from the drawing.<br><br>The Cvetkovic model computes force from the robot's own mechanics rather than from a calibration. A muscle ring anchored below the beam contracts and pulls the leg tips together; the legs rotate as rigid links about their bases, that rotation is imposed on the ends of the compliant beam, and the beam's bending stiffness is what resists. Read backwards, the pull-in measured on video gives the force that caused it.<br><br><b>&nbsp;&nbsp;I = t³·w / 12</b><br><b>&nbsp;&nbsp;θ = asin( (δ/2) / L_leg )</b><br><b>&nbsp;&nbsp;M = 2·E·I·θ / L</b><br><b>&nbsp;&nbsp;F = M / l = 2·E·I·θ / (l·L)</b><br><br><b>δ</b> is the shortening from rest — the resting leg separation minus the separation now — and is the only quantity that comes from the video; everything else is fixed geometry or material. <b>L_leg</b> is the average leg length, and dividing the pull-in between the two legs and taking the arcsine converts a horizontal displacement into the angle each leg has swung through. <b>t</b> is the beam thickness in the bending direction and <b>w</b> its width; together they give <b>I</b>, the second moment of area, which is how strongly the cross-section resists bending — note it goes as the <i>cube</i> of thickness. <b>E</b> is Young's modulus of the hydrogel the beam is cast from, the material's intrinsic stiffness. <b>L</b> is the span that bends, measured leg center to leg center, and appears because a longer beam rotates further for the same moment. <b>M</b> is that moment: the beam's elastic reaction to being rotated by θ at both ends. <b>l</b> is the moment arm — the perpendicular distance from the beam's neutral axis down to the muscle's line of action — and converts the moment back into the force <b>F</b> that produced it.<br><br>Cvetkovic et al. (PNAS 2014) write the same physics as P = 8·E·I·δ_max/(l·L²), in terms of the beam's transverse mid-span deflection δ_max rather than the leg rotation. The two are algebraically identical — substituting δ_max = θ·L/4 turns one into the other, verified numerically to 0.00% across pull-ins from 0.05 to 1.5 mm. The rotation form is used here because it takes the quantity a top-down camera can actually measure.<br><br>With E in pascals and every length in millimeters, E·I/(l·L) evaluates to Pa·mm² = 10⁻⁶ N, so <b>force emerges in micronewtons with no conversion factor</b> — the unit this literature reports, against roughly 395 µN of active tension and 534–1147 µN of passive tension in that paper.<br><br>Two sensitivities are worth carrying in mind. Force is <i>directly proportional to E</i>, and a cast hydrogel's modulus varies between batches and drifts in culture, which makes it the least certain quantity in the calculation; because it enters linearly, a force can be rescaled afterwards without re-tracking. And because I depends on t³, a ten percent error in a callipered thickness becomes a thirty-three percent error in force.",
     },
     "beam_rest": {
         "title": "Resting length",
@@ -520,24 +520,43 @@ HELP: dict[str, dict] = {
     "force_lut": {
         "title": "Simulated LUT",
         "short": "A Length–Force curve from a COMSOL simulation of the device.",
-        "what": 'A two-column CSV of lengths and the forces your simulation predicts for them. Units are read from the header text, so <i>Length (um)</i>, <i>Force (mN)</i> and <i>Load (gf)</i> are all understood and column order does not matter; a file that states no units is treated as millimetres and millinewtons, with that assumption written into the log rather than left silent, because a thousand-fold unit error is exactly the kind that survives review with every number still looking plausible. Between tabulated points the curve is interpolated linearly. Beyond either end it is clamped rather than extrapolated, and the number of frames that fell outside is reported: a simulated curve has a real domain, and continuing its end slope into lengths that were never simulated invents stiffness data, most confidently in exactly the regime where the device is least linear.',
+        "what": 'A two-column CSV of lengths and the forces your simulation predicts for them. Units are read from the header text, so <i>Length (um)</i>, <i>Force (mN)</i> and <i>Load (gf)</i> are all understood and column order does not matter; a file that states no units is treated as millimeters and millinewtons, with that assumption written into the log rather than left silent, because a thousand-fold unit error is exactly the kind that survives review with every number still looking plausible. Between tabulated points the curve is interpolated linearly. Beyond either end it is clamped rather than extrapolated, and the number of frames that fell outside is reported: a simulated curve has a real domain, and continuing its end slope into lengths that were never simulated invents stiffness data, most confidently in exactly the regime where the device is least linear.',
     },
     "view_mode": {
         "title": "View",
-        "short": "The photograph, or the colour distance the segmenter works on.",
-        "what": "Colour distance shows how far each pixel's hue sits from the medium's, "
+        "short": "The photograph, or the color distance the segmenter works on.",
+        "what": "Color distance shows how far each pixel's hue sits from the medium's, "
                 "which is the surface the threshold cuts through. The robot appears "
                 "bright against a dark background regardless of how similar the "
                 "brightnesses are.",
-        "range": "Video · Colour distance (b*)",
-        "default": "Video",
+        "range": "Video · Color distance (b*)",
+        "default": "Color distance (b*)",
         "guidance": [
             "Switch to it when the mask looks wrong. A threshold problem is obvious "
             "here and near-invisible on the photograph.",
-            "If the robot is dim in this view, the colours are genuinely close and "
+            "If the robot is dim in this view, the colors are genuinely close and "
             "brightness keying may do better — check the header chip for which mode "
             "was chosen.",
-            "Only meaningful in colour keying; in brightness mode the video is shown.",
+            "Only meaningful in color keying; in brightness mode the video is shown.",
+        ],
+    },
+    "video_queue": {
+        "title": "Videos in this folder",
+        "short": "Every clip sitting next to the one you opened, and which of them "
+                 "you have already analyzed.",
+        "what": "Lists the video files in the same folder as the current clip, in "
+                "the order a file manager would show them — IMG_2 before IMG_10, "
+                "not after it. Click one to load it. A filled green dot means a "
+                "results folder for that clip already exists inside the output "
+                "folder, so it has been run; a hollow dot means it has not.",
+        "guidance": [
+            "The dot is read from the filesystem each time the list refreshes, so "
+            "deleting a results folder to redo a clip immediately shows it as "
+            "unanalyzed again.",
+            "The dot only knows a folder exists. It cannot tell a good run from a "
+            "bad one — check the fit confidence for that.",
+            "Next video below the plots walks down this list, keeping your "
+            "parameters and drawing and clearing the fit.",
         ],
     },
     "features": {
@@ -553,12 +572,12 @@ HELP: dict[str, dict] = {
         "range": "on / off (needs a DXF with interior loops)",
         "default": "on",
         "guidance": [
-            "It pairs with a tighter colour cut, which is what it is for. Measured on "
+            "It pairs with a tighter color cut, which is what it is for. Measured on "
             "the reference clip at cut 0.45 and 0.60, width CV improved from 2.17% to "
             "1.90% and from 2.58% to 1.90%.",
             "At a loose cut it can make things worse — at 0.30 the mask is bloated and "
             "the interior edges are unreliable. Raise the cut and turn this on together.",
-            "Interior edges are taken from the colour-distance image, not the mask: an "
+            "Interior edges are taken from the color-distance image, not the mask: an "
             "aggressively thresholded mask is a solid blob with no interior at all "
             "(zero enclosed holes on the reference clip, at any morphology setting).",
             "Watch the interior percentage in the readout and the run summary. It is "
@@ -627,11 +646,11 @@ HELP: dict[str, dict] = {
             "Two speeds are reported. The path slope is regressed on the cumulative "
             "path; the net rate is straight-line start-to-finish over the same window.",
             "Cumulative path only ever increases, so every wobble of the centroid adds "
-            "distance the robot never travelled — the path slope reads as locomotion "
+            "distance the robot never traveled — the path slope reads as locomotion "
             "plus jitter. With 0.6 px of centroid noise at 30 Hz it measured 50.4 "
             "mm/min against a true 3.18 mm/min. Net displacement cannot do that.",
             "A path-to-net ratio above about 2 is flagged: at that point the centroid "
-            "is wandering more than the robot is travelling, and the net rate is the "
+            "is wandering more than the robot is traveling, and the net rate is the "
             "one to quote.",
             "Fit confidence is not measured — it describes the tracker, not the robot.",
             "Whatever is selected when a run starts is drawn and annotated on the "
@@ -670,12 +689,12 @@ HELP: dict[str, dict] = {
         "guidance": [
             "Check it against the video — the placement overlay draws the outline you "
             "have chosen, so a wrong pick is obvious the moment you see it on the robot.",
-            "Dimensions listed beside each option are the real millimetres from the "
+            "Dimensions listed beside each option are the real millimeters from the "
             "drawing; the one matching the part you measured is the one you want.",
             "An option marked [open] did not close. It is usable but the drawing has a "
             "gap in it, and the fit will be worse than a closed outline.",
             "Changing this clears any manual placement, because the scale factors are "
-            "per template millimetre and would otherwise mean a different size.",
+            "per template millimeter and would otherwise mean a different size.",
         ],
     },
 

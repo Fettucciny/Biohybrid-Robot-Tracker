@@ -76,7 +76,12 @@ def main(argv=None) -> int:
     res = run(cfg, progress=prog)
     print(f"\r{' '*40}\r", end="", file=sys.stderr)
     print(res.summary())
-    print(f"\nwrote {a.outdir}/tracking.csv, summary.png, run_info.json"
+    # Report where the files actually landed, not where they were asked for:
+    # each clip now gets its own subfolder under --outdir, and printing the
+    # parent would send anyone following the message to an empty directory.
+    from .pipeline import output_dir
+    dest = output_dir(a.outdir, a.video)
+    print(f"\nwrote {dest}/tracking.csv, summary.png, run_info.json"
           + ("" if a.no_overlay else ", overlay.mp4"))
     return 0
 

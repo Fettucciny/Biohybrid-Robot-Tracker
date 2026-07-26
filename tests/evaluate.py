@@ -6,12 +6,12 @@
     python tests/evaluate.py /tmp/synth/out/tracking.csv /tmp/synth/truth_30.npy
 
 Width is no longer a per-frame output -- it is the *ruler*, held fixed and used
-to convert pixels to millimetres -- so it cannot be scored frame by frame the
+to convert pixels to millimeters -- so it cannot be scored frame by frame the
 way length and position are. What replaces that check is stricter, not weaker:
 the recovered ``calibration_px_per_mm`` in run_info.json is compared against the
 generator's true scale, and the width's coefficient of variation is checked to
 confirm the thing being used as a ruler really is rigid. A calibration error
-would bias every millimetre figure in the table, so it is the more important
+would bias every millimeter figure in the table, so it is the more important
 number of the two.
 """
 from __future__ import annotations

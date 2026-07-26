@@ -14,7 +14,7 @@ run_info.json. A figure you cropped to the interesting three seconds is worth
 keeping; one that silently reverted to the full clip is not.
 
 Units follow the calibration. With the robot's width as the ruler the vertical
-axis is micrometres; without a calibration it stays in pixels and says so.
+axis is micrometers; without a calibration it stays in pixels and says so.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def average_delta(t: np.ndarray, y: np.ndarray,
     Turning points need a prominence floor or ordinary measurement noise
     registers as thousands of tiny cycles. The floor scales with the trace's own
     range, so it needs no unit-specific tuning and works on strain and
-    micrometres alike.
+    micrometers alike.
     """
     from scipy.signal import find_peaks
 
@@ -130,12 +130,12 @@ class PlotPanel(QWidget):
 
     REFRESH_MS = 250
     DRAW_THROTTLE_MS = 30        # ~33 fps ceiling for pan and zoom
-    selectionAnalysed = Signal(dict)
+    selectionAnalyzed = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         matplotlib.rcParams.update(matplotlib_rc())
-        self.colours = series_colors()
+        self.colors = series_colors()
 
         self.fig = Figure(figsize=(4.2, 8.0), dpi=100, constrained_layout=True)
         self.canvas = FigureCanvasQTAgg(self.fig)
@@ -149,11 +149,11 @@ class PlotPanel(QWidget):
         self.has_force = False
         # True width of the robot in mm. With it, the panel derives its own
         # scale from the widths arriving in the live rows, so the axis is in
-        # micrometres from the first cycle instead of waiting for the run to
+        # micrometers from the first cycle instead of waiting for the run to
         # finish -- and without depending on a preview fit having happened.
         self.width_mm: float | None = None
         self._drag = None
-        self._sel = None            # (t0, t1) of the analysed region
+        self._sel = None            # (t0, t1) of the analyzed region
         self._sel_drag = None
         self._sel_artists: list = []
         self.stats: dict = {}
@@ -268,6 +268,20 @@ class PlotPanel(QWidget):
         self._timer.stop()
         self._redraw()
 
+    def reset(self):
+        """Empty the panel, for when a different clip is loaded.
+
+        Leaving the previous clip's curves on screen while a new video loads is
+        worse than an empty panel: the axes still carry the old time range and
+        the old micrometre scale, so the plots look like data about the video
+        now in the viewer, and they are not.
+        """
+        self._timer.stop()
+        self._rows = []
+        self._home.clear()
+        self.clear_selection()
+        self._redraw()
+
     def set_table(self, df, um_per_px: float | None, has_force: bool):
         """Replace live data with the finished, gated and smoothed table."""
         self._timer.stop()
@@ -322,7 +336,7 @@ class PlotPanel(QWidget):
 
         # Displacement along each axis, relative to the first tracked position.
         # Net x and y say *where* the robot went; the cumulative path only says
-        # how far it travelled, and the two differ whenever it doubles back.
+        # how far it traveled, and the two differ whenever it doubles back.
         cx = np.array([r.get("cx", np.nan) for r in self._rows], float) * k
         cy = np.array([r.get("cy", np.nan) for r in self._rows], float) * k
         first = np.flatnonzero(np.isfinite(cx))
@@ -353,7 +367,7 @@ class PlotPanel(QWidget):
         keep = {k: (ax.get_xlim(), ax.get_ylim()) for k, ax in self._axes.items()
                 if k in self._home}
 
-        col = self.colours
+        col = self.colors
         for key, y, c in (("length", length, col[0]),
                           ("force", force, col[2]),
                           ("path", path, col[0]),
@@ -390,7 +404,7 @@ class PlotPanel(QWidget):
             # ax.clear() dropped the span and labels; recompute against the data
             # that is now on screen rather than redrawing stale numbers.
             self._sel_artists = []
-            self.analyse_selection()
+            self.analyze_selection()
         else:
             self.canvas.draw_idle()
 
@@ -500,11 +514,11 @@ class PlotPanel(QWidget):
                 self.clear_selection()
                 return
             self._sel = (a, b)
-            self.analyse_selection()
+            self.analyze_selection()
 
     # ---- region analysis -------------------------------------------------
 
-    def analyse_selection(self) -> dict:
+    def analyze_selection(self) -> dict:
         """Measure the selected stretch and label each panel with the result."""
         self.stats = {}
         if self._sel is None:
@@ -524,7 +538,7 @@ class PlotPanel(QWidget):
             out["note"] = "too few frames in the selection to measure"
             self.stats = out
             self._draw_selection()
-            self.selectionAnalysed.emit(out)
+            self.selectionAnalyzed.emit(out)
             return out
 
         d_len, c_len = average_delta(t[m], length[m])
@@ -534,8 +548,8 @@ class PlotPanel(QWidget):
         # Speed from the cumulative path only. x and y are drawn for direction,
         # but a regression through either would report a component, not a speed.
         #
-        # Reported in mm/min. These robots cover millimetres over a clip, so
-        # micrometres per minute runs to five figures for an ordinary walk.
+        # Reported in mm/min. These robots cover millimeters over a clip, so
+        # micrometers per minute runs to five figures for an ordinary walk.
         div = 1000.0 if self.um_per_px else 1.0
         out["speed_units"] = "mm/min" if self.um_per_px else "px/min"
         out["speed_per_min"] = slope_per_min(t[m], path[m]) / div
@@ -543,7 +557,7 @@ class PlotPanel(QWidget):
         # Net displacement over the same window, as a check on the path slope.
         #
         # Cumulative path only ever increases, so every wobble of the centroid
-        # adds distance the robot never travelled and its slope reads as
+        # adds distance the robot never traveled and its slope reads as
         # locomotion plus jitter. Net displacement cannot do that -- it is
         # start to finish, in a straight line. On the reference clip the path
         # slope runs 1.2-1.3x the net rate; a much larger ratio means the
@@ -566,7 +580,7 @@ class PlotPanel(QWidget):
 
         self.stats = out
         self._draw_selection()
-        self.selectionAnalysed.emit(out)
+        self.selectionAnalyzed.emit(out)
         return out
 
     def _annotation(self, key: str) -> str:

@@ -40,7 +40,9 @@ MANIFEST_NAME = "robotrack-updates.json"
 
 # Only source ships in a code patch. Caches are per-interpreter and would be
 # stale on arrival; theme kit JSON and any future data files are included.
-INCLUDE_SUFFIXES = {".py", ".json", ".txt", ".md", ".png", ".ico", ".svg"}
+# .wav carries the completion sounds; without it a code patch would ship
+# the code that plays them and not the sounds themselves.
+INCLUDE_SUFFIXES = {".py", ".json", ".txt", ".md", ".png", ".ico", ".svg", ".wav"}
 EXCLUDE_DIRS = {"__pycache__", ".git", ".pytest_cache"}
 
 

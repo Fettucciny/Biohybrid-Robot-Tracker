@@ -11,7 +11,7 @@ a calibration you measured on a rig:
     ...
 
 Units are read from the header text rather than assumed. A file that says
-``Length (um)`` is treated as micrometres; one that says nothing is treated as
+``Length (um)`` is treated as micrometers; one that says nothing is treated as
 mm and mN, and the assumption is reported rather than made silently -- a
 thousand-fold unit error is exactly the kind that survives review because every
 number still looks plausible.
@@ -34,11 +34,11 @@ import numpy as np
 
 # Multipliers to the canonical units (mm for length, mN for force).
 LENGTH_UNITS = {
-    "m": 1000.0, "meter": 1000.0, "metre": 1000.0, "meters": 1000.0,
+    "m": 1000.0, "meter": 1000.0, "meter": 1000.0, "meters": 1000.0,
     "cm": 10.0, "centimeter": 10.0, "centimetre": 10.0,
-    "mm": 1.0, "millimeter": 1.0, "millimetre": 1.0,
+    "mm": 1.0, "millimeter": 1.0, "millimeter": 1.0,
     "um": 1e-3, "µm": 1e-3, "μm": 1e-3, "micron": 1e-3, "micrometer": 1e-3,
-    "micrometre": 1e-3, "nm": 1e-6,
+    "micrometer": 1e-3, "nm": 1e-6,
 }
 FORCE_UNITS = {
     "n": 1000.0, "newton": 1000.0, "newtons": 1000.0,

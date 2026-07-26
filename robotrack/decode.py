@@ -215,7 +215,7 @@ class FrameReader:
         # decoding only them skips all inter-frame reconstruction: 35 frames in
         # 1.1 s against 16.7 s for a full pass on the reference clip, and the gap
         # widens with length because keyframe count grows with duration, not
-        # with frame count. For a background plate or a colour estimate, "some
+        # with frame count. For a background plate or a color estimate, "some
         # frames spread over the clip" is exactly the requirement.
         kf = self._keyframes()
         if len(kf) >= max(8, n // 3):

@@ -22,7 +22,7 @@ The accent
 
 One caution that comes with a red accent: red reads as "danger" in most
 interfaces, and the primary action button is filled with it. Warnings and errors
-therefore use amber and a desaturated state colour, never another red, so the
+therefore use amber and a desaturated state color, never another red, so the
 accent never has to compete with an alarm.
 """
 
@@ -58,7 +58,7 @@ C = {
     "dim":       M.TEXT_DIM,
     "plot_bg":   M.PLOT_BG,
     "plot_fg":   M.PLOT_FG,
-    # State colours. Deliberately not red -- see the module docstring.
+    # State colors. Deliberately not red -- see the module docstring.
     "ok":        M.ACCENTS["explorer"],   # emerald
     "warn":      M.ACCENTS["solar"],      # amber
 }
@@ -167,7 +167,7 @@ def matplotlib_rc() -> dict:
 
 
 def series_colors() -> list[str]:
-    """Line colours for plots.
+    """Line colors for plots.
 
     The accent leads, then two well-separated parula stops. Using the shared
     colormap for series keeps figures recognisably part of the suite without
@@ -206,7 +206,7 @@ class HelpPopup(QFrame):
         lay.setContentsMargins(self.MARGIN, 14, self.MARGIN, 14)
         lay.setSpacing(9)
 
-        def wrapped(html: str, colour: str, bold: bool = False) -> QLabel:
+        def wrapped(html: str, color: str, bold: bool = False) -> QLabel:
             """A word-wrapped label that reports its true height.
 
             A QLabel with wordWrap does not know its height until it knows its
@@ -222,7 +222,7 @@ class HelpPopup(QFrame):
             if bold:
                 f = QFont(M.FONT_FAMILY, 11); f.setBold(True)
                 lab.setFont(f)
-            lab.setStyleSheet(f"color: {colour}; background: transparent;")
+            lab.setStyleSheet(f"color: {color}; background: transparent;")
             lab.setMinimumHeight(lab.heightForWidth(inner))
             return lab
 
@@ -310,7 +310,7 @@ class Card(QFrame):
         outer.addLayout(self.body)
 
     def add_row(self, label: str, widget: QWidget, spec: dict | None = None) -> QWidget:
-        """One labelled control with an optional (?) badge."""
+        """One labeled control with an optional (?) badge."""
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
@@ -333,7 +333,7 @@ class Card(QFrame):
 
 
 def style_chip(lab: QLabel, kind: str = "") -> None:
-    """Recolour a status chip. ``kind`` is '', 'ok' or 'warn' -- never red."""
+    """Recolor a status chip. ``kind`` is '', 'ok' or 'warn' -- never red."""
     col = {"ok": C["ok"], "warn": C["warn"]}.get(kind, M.TEXT_MUTED)
     border = col if kind else M.LINE
     lab.setStyleSheet(

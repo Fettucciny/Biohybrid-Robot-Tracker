@@ -6,7 +6,7 @@ frame. Two things this buys you beyond markerless contour tracking:
 * Occlusion tolerance. The template knows what the hidden part *should* look
   like, so a robot half-covered by an obstacle still yields a full outline.
 * Real units for free. A DXF is drawn to scale, so if the drawing is in
-  millimetres the fitted scale factors convert pixels to millimetres without a
+  millimeters the fitted scale factors convert pixels to millimeters without a
   separate ruler calibration (though a ruler is still a good cross-check).
 """
 
@@ -44,8 +44,8 @@ def signed_distance_grid(pts: np.ndarray, res: int = 192, margin: float = 0.45):
     lo = pts.min(axis=0)
     hi = pts.max(axis=0)
     span = (hi - lo).max() * (1.0 + 2 * margin)
-    centre = (lo + hi) / 2.0
-    origin = centre - span / 2.0
+    center = (lo + hi) / 2.0
+    origin = center - span / 2.0
     spacing = span / (res - 1)
 
     grid_pts = ((pts - origin) / spacing).astype(np.int32)
@@ -78,7 +78,7 @@ def outward_normals(pts: np.ndarray) -> np.ndarray:
 
 @dataclass
 class Template:
-    points: np.ndarray        # (M,2) float32, centred, axis-aligned, in mm
+    points: np.ndarray        # (M,2) float32, centered, axis-aligned, in mm
     normals: np.ndarray       # (M,2) float32, unit outward normals
     closed_loops: list[np.ndarray]
     units: str
@@ -217,7 +217,7 @@ def read_loops(path: str | Path, flatten_mm: float = 0.05,
     largest closed loop in such a file is the *paper*, so picking the biggest
     loop tracks the page and reports a robot the size of a sheet of A4.
 
-    Sheet furniture is recognised structurally rather than by size: a rectangle
+    Sheet furniture is recognized structurally rather than by size: a rectangle
     that encloses most of the other geometry is a border, whatever its
     dimensions. That leaves the part outlines, which are returned largest-first
     and can still be overridden by the caller when a drawing shows several parts.
@@ -324,7 +324,7 @@ def load_dxf(path: str | Path, n_points: int = 400, flatten_mm: float = 0.05,
              assume_units: str | None = None, loop_index: int | None = None,
              scale: float = 1.0, use_features: bool = True,
              feature_points: int = 300) -> Template:
-    """Read a DXF and produce a normalised template.
+    """Read a DXF and produce a normalized template.
 
     ``flatten_mm`` is the chord tolerance used when converting arcs, splines and
     ellipses to polylines -- 0.05 mm is far below any measurement you will make
@@ -332,7 +332,7 @@ def load_dxf(path: str | Path, n_points: int = 400, flatten_mm: float = 0.05,
 
     ``scale`` multiplies the drawing's dimensions. It matters more than it looks:
     the robot's width is the calibration ruler, so a drawing at the wrong scale
-    biases every micrometre in the output by the same factor. This is the dial
+    biases every micrometer in the output by the same factor. This is the dial
     for a drawing in the wrong units, at a detail scale, or of a design that was
     fabricated slightly larger or smaller than drawn.
 

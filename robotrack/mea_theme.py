@@ -4,8 +4,8 @@ mea_theme.py  --  Shared UI theme for the MEA Suite programs
 
 One small, dependency-light module that gives every MEA program the same look
 as the launchers, splash screens, and the MEA Suite selector: the indigo->teal
-dark palette, a per-program accent colour, clean fonts, rounded "card" panels,
-and matching plot colours.
+dark palette, a per-program accent color, clean fonts, rounded "card" panels,
+and matching plot colors.
 
 It supports both GUI toolkits used across the suite:
   * PyQt5 / pyqtgraph  (MEA Explorer, MEA Pattern Creator, MEA Solar Cell)
@@ -56,7 +56,7 @@ TEXT_DIM    = "#6B8299"
 PLOT_BG     = "#0C121E"
 PLOT_FG     = "#C7D2DE"
 
-# Per-program accent colours (identical to the icons / splashes / selector)
+# Per-program accent colors (identical to the icons / splashes / selector)
 ACCENTS = {
     "analyzer": "#3B82F6",   # royal blue
     "explorer": "#34D399",   # emerald
@@ -81,7 +81,7 @@ def _rgb(h):
     h = h.lstrip("#"); return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
 def tint(h, f):
-    """Lighten (f>0) or darken (f<0) a hex colour toward white/black."""
+    """Lighten (f>0) or darken (f<0) a hex color toward white/black."""
     r, g, b = _rgb(h)
     if f >= 0:
         r, g, b = (int(r+(255-r)*f), int(g+(255-g)*f), int(b+(255-b)*f))
@@ -223,7 +223,7 @@ def apply_qt(app, acc="analyzer"):
     Binding-agnostic: works with PyQt6 (MEA Analyzer / MEA-NAP), PyQt5 (the
     other suite programs, pre-migration), or the PySide equivalents. PyQt6
     scopes its enums (QPalette.ColorRole.Window) while PyQt5 does not
-    (QPalette.Window), so the colour roles are resolved by name."""
+    (QPalette.Window), so the color roles are resolved by name."""
     A = accent(acc)
     QtGui = None
     for binding in ("PyQt6", "PyQt5", "PySide6", "PySide2"):
@@ -243,13 +243,13 @@ def apply_qt(app, acc="analyzer"):
     def role(name):
         return getattr(_roles, name)
 
-    for name, colour in (
+    for name, color in (
             ("Window", WINDOW_TOP), ("Base", FIELD), ("AlternateBase", PANEL),
             ("Text", TEXT), ("WindowText", TEXT), ("Button", PANEL_HI),
             ("ButtonText", TEXT), ("Highlight", A), ("HighlightedText", "#0A0E16"),
             ("ToolTipBase", PANEL_HI), ("ToolTipText", TEXT)):
         try:
-            pal.setColor(role(name), C(colour))
+            pal.setColor(role(name), C(color))
         except Exception:
             pass
     app.setPalette(pal)
@@ -274,7 +274,7 @@ _PARULA_ANCHORS = [
     "#352A87", "#2058B0", "#1B7EB4", "#22A784", "#7DD34F", "#D9DA4B", "#F9FB0E",
 ]
 def parula(n=256):
-    """Return a list of n hex colours approximating MATLAB 'parula'."""
+    """Return a list of n hex colors approximating MATLAB 'parula'."""
     a = [_rgb(c) for c in _PARULA_ANCHORS]; m = len(a) - 1
     out = []
     for i in range(n):
@@ -329,7 +329,7 @@ def apply_tk(root, acc="analyzer"):
                     background=PANEL_HI, arrowcolor=TEXT_MUTED, bordercolor=LINE)
     style.map("TCombobox", fieldbackground=[("readonly", FIELD)],
               foreground=[("readonly", TEXT)], bordercolor=[("focus", A)])
-    # dropdown list colours (Tk listbox behind the Combobox popdown)
+    # dropdown list colors (Tk listbox behind the Combobox popdown)
     root.option_add("*TCombobox*Listbox.background", PANEL_HI)
     root.option_add("*TCombobox*Listbox.foreground", TEXT)
     root.option_add("*TCombobox*Listbox.selectBackground", A)

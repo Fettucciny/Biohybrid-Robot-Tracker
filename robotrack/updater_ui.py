@@ -66,7 +66,8 @@ class UpdateDialog(QDialog):
 
     def __init__(self, channel: str, parent=None, on_channel_change=None):
         super().__init__(parent)
-        self.setWindowTitle("robotrack — updates")
+        from . import APP_NAME
+        self.setWindowTitle(f"{APP_NAME} — updates")
         self.setMinimumWidth(560)
         self._channel = channel
         self._on_channel_change = on_channel_change
@@ -123,7 +124,7 @@ class UpdateDialog(QDialog):
     # ---- channel ---------------------------------------------------------
 
     def channel(self) -> str:
-        return U.normalise_channel(self.edit_channel.text())
+        return U.normalize_channel(self.edit_channel.text())
 
     def _remember_channel(self):
         ch = self.channel()
