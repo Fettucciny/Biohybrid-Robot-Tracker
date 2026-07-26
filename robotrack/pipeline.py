@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import cv2
@@ -546,9 +546,77 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         res.elapsed_s = time.time() - t_start
         res.fps_processed = len(t) / max(res.elapsed_s, 1e-9)
         (out / "run_info.json").write_text(json.dumps(
-            {**meta, "stage_seconds": res.stage_times,
-             "elapsed_s": res.elapsed_s}, indent=2, default=str))
+            _json_safe({**meta, "stage_seconds": res.stage_times,
+                        "elapsed_s": res.elapsed_s}),
+            indent=2, default=str, allow_nan=False))
     return res
+
+
+def export_subset(res: Result, outdir: str | Path, t0: float, t1: float,
+                  axis_ranges: dict | None = None,
+                  suffix: str = "subset") -> list[Path]:
+    """Write just the selected time window as its own CSV, figure and metadata.
+
+    A selected region is usually the part of a recording that is actually the
+    experiment -- the stretch after the tissue settled and before the medium
+    warmed, or one bout of contraction among several. Writing it out as a
+    separate, self-describing set means the analysis of that stretch can be
+    handed to someone else, or plotted, without carrying the whole clip and a
+    note about which seconds mattered.
+
+    Files land beside the full run, with ``_<suffix>`` on the stem, so the pair
+    stays together and cannot be confused for two different runs of the same
+    clip. Returns the paths written.
+    """
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    lo, hi = (float(t0), float(t1)) if t0 <= t1 else (float(t1), float(t0))
+
+    t = res.table
+    sub = t[(t["t"] >= lo) & (t["t"] <= hi)].copy()
+    if sub.empty:
+        raise ValueError(f"no frames between {lo:.3f} s and {hi:.3f} s")
+
+    # Path length is cumulative from the start of the clip, so an unmodified
+    # slice would open at whatever distance the robot had already travelled.
+    # Re-zeroing makes the subset's path column mean "distance within this
+    # window", which is the only reading of it that makes sense here.
+    for col in ("path_length", "path_length_um"):
+        if col in sub:
+            sub[col] = sub[col] - sub[col].iloc[0]
+
+    written = []
+    csv_path = out / f"tracking_{suffix}.csv"
+    sub.to_csv(csv_path, index=False)
+    written.append(csv_path)
+
+    # A Result carrying only the slice, so the figure builder needs no changes
+    # and the subset figure is drawn by exactly the same code as the full one.
+    sub_res = replace(res, table=sub)
+    png_path = out / f"summary_{suffix}.png"
+    _plots(sub_res, png_path, {"time": [lo, hi], "zoomed": True,
+                               **{k: v for k, v in (axis_ranges or {}).items()
+                                  if k not in ("time", "zoomed", "selection")}})
+    written.append(png_path)
+
+    meta = {
+        "source": "region selected in the plot panel",
+        "video": res.info.to_dict(),
+        "window_s": [lo, hi],
+        "duration_s": hi - lo,
+        "frames": int(len(sub)),
+        "frames_in_full_run": int(len(t)),
+        "calibration_px_per_mm": res.calibration_px_per_mm,
+        "calibration_source": res.calibration_source,
+        "region_analysis": (axis_ranges or {}).get("selection_stats") or None,
+        "note": ("Cumulative path is re-zeroed to the start of this window. "
+                 "Every other column is copied unchanged from the full run."),
+    }
+    json_path = out / f"run_info_{suffix}.json"
+    json_path.write_text(json.dumps(_json_safe(meta), indent=2, default=str,
+                                    allow_nan=False))
+    written.append(json_path)
+    return written
 
 
 def _plots(res: Result, path: Path, axis_ranges: dict | None = None) -> None:
@@ -560,6 +628,9 @@ def _plots(res: Result, path: Path, axis_ranges: dict | None = None) -> None:
     from .theme import C as THEME, matplotlib_rc, series_colors
     matplotlib.rcParams.update(matplotlib_rc())
     col = series_colors()
+
+    axis_ranges = axis_ranges or {}
+    zoomed = bool(axis_ranges.get("zoomed"))
 
     t = res.table
     calibrated = res.calibration_px_per_mm is not None
@@ -591,12 +662,16 @@ def _plots(res: Result, path: Path, axis_ranges: dict | None = None) -> None:
         if key == "conf":
             a.axhline(50.0, ls="--", lw=0.8, color=THEME["muted"])
             a.set_ylim(0, 102)
-        if axis_ranges and key in axis_ranges:
+        # Only honour a *deliberate* zoom. Without the "zoomed" guard an
+        # untouched panel reports its matplotlib defaults of (0, 1), and
+        # applying those flattens every curve in the exported figure into a
+        # unit band -- which is what this figure used to do, every time.
+        if zoomed and key in axis_ranges:
             try:
                 a.set_ylim(*axis_ranges[key])
             except (TypeError, ValueError):
                 pass
-    if axis_ranges and "time" in axis_ranges:
+    if zoomed and "time" in axis_ranges:
         try:
             ax[0].set_xlim(*axis_ranges["time"])
         except (TypeError, ValueError):

@@ -625,11 +625,16 @@ class PlotPanel(QWidget):
                 continue                      # confidence is not measured
             text = self._annotation(key)
             if text:
+                # These carry the actual result of a region selection -- the
+                # average delta and the speed -- so they are the one thing on
+                # the panel worth reading from a step back, and 7.5 pt was
+                # sized for a caption rather than for a number you act on.
                 self._sel_artists.append(ax.annotate(
-                    text, xy=(0.99, 0.06), xycoords="axes fraction",
-                    ha="right", va="bottom", fontsize=7.5, color=THEME["text"],
-                    bbox=dict(boxstyle="round,pad=0.28", fc=THEME["panel"],
-                              ec=THEME["accent"], alpha=0.9, lw=0.8)))
+                    text, xy=(0.985, 0.07), xycoords="axes fraction",
+                    ha="right", va="bottom", fontsize=11.5, fontweight="bold",
+                    color=THEME["text"],
+                    bbox=dict(boxstyle="round,pad=0.42", fc=THEME["panel"],
+                              ec=THEME["accent"], alpha=0.94, lw=1.2)))
         self._throttled_draw()
 
     def clear_selection(self):
@@ -644,7 +649,17 @@ class PlotPanel(QWidget):
     # ---- export ----------------------------------------------------------
 
     def axis_ranges(self) -> dict:
-        """What is on screen now, as ``{panel: [lo, hi]}`` plus the shared x."""
+        """What is on screen now, as ``{panel: [lo, hi]}`` plus the shared x.
+
+        Reports nothing when the panel holds no data. An empty matplotlib axis
+        sits at its default (0, 1), and those defaults are indistinguishable
+        from a deliberate zoom once they have been written to a dict -- which is
+        exactly how every exported figure ended up squashed to a 0-1 y range.
+        The ranges were captured before the run, when there was nothing plotted
+        yet, and then faithfully applied to the finished figure.
+        """
+        if not self._rows:
+            return {"zoomed": False}
         out: dict[str, list] = {}
         for key, ax in self._axes.items():
             lo, hi = ax.get_ylim()

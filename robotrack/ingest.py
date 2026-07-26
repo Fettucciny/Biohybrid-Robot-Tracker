@@ -199,6 +199,38 @@ def _snap(fps: float) -> float:
     return best if abs(best - fps) / best < 0.06 else round(fps, 2)
 
 
+def quick_probe(path: str | Path) -> tuple[int, int, int] | None:
+    """``(n_frames, width, height)`` cheaply, or None if it cannot be read.
+
+    ``probe`` reads the container's whole packet table to recover real
+    presentation timestamps, which is the right thing to do for a clip you are
+    about to analyze and much too expensive for one you merely want to *size*.
+    Estimating how long a folder will take means asking that question of every
+    file in it, so this reads the stream header only -- one ffprobe call, no
+    packet walk, a few milliseconds each.
+
+    ``nb_frames`` is absent from some containers, so it falls back to
+    duration x frame rate. That is an estimate, and it is used to produce an
+    estimate, which is an honest match.
+    """
+    try:
+        meta = _ffprobe(["-select_streams", "v:0", "-show_streams", str(path)])
+        st = meta["streams"][0]
+        w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+        n = int(st.get("nb_frames") or 0)
+        if n <= 0:
+            dur = float(st.get("duration") or 0.0)
+            rate = st.get("avg_frame_rate") or "0/1"
+            num, _, den = rate.partition("/")
+            fps = float(num) / float(den or 1) if float(den or 1) else 0.0
+            n = int(round(dur * fps))
+        if n <= 0 or w <= 0 or h <= 0:
+            return None
+        return n, w, h
+    except Exception:
+        return None
+
+
 def probe(path: str | Path, max_ts_frames: int = 20000) -> VideoInfo:
     """Inspect a video and return its true timing.
 

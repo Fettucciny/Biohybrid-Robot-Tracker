@@ -113,6 +113,13 @@ DEFAULTS: dict[str, Any] = {
     # --- notifications ---------------------------------------------------
     "sound_enabled": True,
 
+    # --- throughput history ----------------------------------------------
+    # [[frames, pixels, seconds], ...] from finished runs, newest last. Used to
+    # estimate how long the rest of a folder will take. Kept per machine rather
+    # than shipped with a config: an RTX 4090 and an M1 do not share a rate, and
+    # a borrowed .rtcfg should not import someone else's timings.
+    "run_history": [],
+
     # --- window ----------------------------------------------------------
     "window_geometry": "",          # base64 QByteArray from saveGeometry()
 }

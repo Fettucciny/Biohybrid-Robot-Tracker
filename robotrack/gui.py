@@ -81,6 +81,37 @@ OK_BGR = _bgr(C["ok"])        # confident fit
 WARN_BGR = _bgr(C["warn"])    # low confidence
 
 
+def _draw_conf_badge(img: np.ndarray, conf: float) -> None:
+    """Stamp the fit confidence into the top-left of the preview frame.
+
+    It was already computed and already shown -- as one item in a run of small
+    grey text under the video. That is the wrong place for it: confidence is
+    the number that decides whether the outline you are looking at means
+    anything, and while you are dragging a threshold your eyes are on the frame,
+    not on the status line. Putting it in the corner of the picture costs
+    nothing and removes the glance.
+
+    Colored by the same 0.5 cut the analysis uses to accept a frame, so the
+    badge answers "would this frame count?" without being read as a number.
+    """
+    ok = conf >= 0.5
+    color = OK_BGR if ok else WARN_BGR
+    text = f"conf {100 * conf:.0f}%"
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2
+    (tw, th), base = cv2.getTextSize(text, font, scale, thick)
+    pad = 9
+    x0, y0 = 10, 10
+    x1, y1 = x0 + tw + 2 * pad, y0 + th + base + 2 * pad
+    # Darken behind the text rather than filling flat: the badge stays legible
+    # over both the photograph and the bright end of the chroma colormap.
+    roi = img[y0:y1, x0:x1]
+    if roi.size:
+        img[y0:y1, x0:x1] = (roi.astype(np.float32) * 0.35).astype(np.uint8)
+    cv2.rectangle(img, (x0, y0), (x1, y1), color, 2, cv2.LINE_AA)
+    cv2.putText(img, text, (x0 + pad, y1 - pad - base // 2), font, scale,
+                color, thick, cv2.LINE_AA)
+
+
 # --------------------------------------------------------------------------
 # Workers
 # --------------------------------------------------------------------------
@@ -207,6 +238,7 @@ class PreviewWorker(QThread):
                 pose = fitter.fit(mask, signal=sig)
                 if pose is not None:
                     fitted = list(pose.as_array())
+                    _draw_conf_badge(img, float(pose.confidence))
                     if self.show["fit"]:
                         out = fitter.outline(pose).astype(np.int32)
                         col = OK_BGR if pose.confidence >= 0.5 else WARN_BGR
@@ -443,6 +475,9 @@ class MainWindow(QMainWindow):
         self.info: VideoInfo | None = None
         self._split = None
         self._queue: list = []
+        self._sizes: dict = {}       # video path -> (frames, pixels), for the estimate
+        self._sizer = None
+        self._result = None          # the finished Result, for subset export
         self.reader: FrameReader | None = None
         self.background = None
         self.template: Template | None = None
@@ -983,6 +1018,10 @@ class MainWindow(QMainWindow):
         hh.addWidget(self.lbl_queue_count)
         v.addWidget(head)
 
+        self.lbl_eta = QLabel(""); self.lbl_eta.setObjectName("Hint")
+        self.lbl_eta.setWordWrap(True)
+        v.addWidget(self.lbl_eta)
+
         self.list_videos = QListWidget()
         self.list_videos.setMaximumHeight(146)
         self.list_videos.itemActivated.connect(self._on_queue_pick)
@@ -993,6 +1032,18 @@ class MainWindow(QMainWindow):
         self.plots.selectionAnalyzed.connect(self._on_region)
         v.addWidget(self.plots, 1)
 
+        row = QWidget(); rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(7)
+
+        self.btn_export_sel = QPushButton("Export selected region")
+        self.btn_export_sel.setObjectName("Ghost")
+        self.btn_export_sel.setToolTip(
+            "Write the highlighted time window as its own CSV, figure and "
+            "metadata, beside the full run and named with a _subset suffix.")
+        self.btn_export_sel.setEnabled(False)
+        self.btn_export_sel.clicked.connect(self._export_selection)
+        rl.addWidget(self.btn_export_sel, 1)
+
         self.btn_next_video = QPushButton("Next video  →")
         self.btn_next_video.setObjectName("Ghost")
         self.btn_next_video.setToolTip(
@@ -1000,8 +1051,167 @@ class MainWindow(QMainWindow):
             "are kept; the fit and the plots are cleared.")
         self.btn_next_video.setEnabled(False)
         self.btn_next_video.clicked.connect(self._next_video)
-        v.addWidget(self.btn_next_video)
+        rl.addWidget(self.btn_next_video, 1)
+        v.addWidget(row)
         return w
+
+    # ---- how long the rest of the folder will take -----------------------
+
+    MAX_HISTORY = 40
+
+    def _record_throughput(self, res):
+        """Remember what this run cost, as frames x pixels per second.
+
+        Neither frame count nor resolution predicts runtime on its own -- a
+        short 4K clip and a long postage-stamp clip can take the same time --
+        but their product tracks it closely, because the per-frame cost is
+        dominated by work that scales with area. One number per run, and the
+        median of them is the machine's rate.
+        """
+        try:
+            px = int(res.info.width) * int(res.info.height)
+            n = int(len(res.table))
+            secs = float(res.elapsed_s)
+            if n <= 0 or px <= 0 or secs <= 0:
+                return
+            hist = list(self.state.get("run_history") or [])
+            hist.append([n, px, secs])
+            self.state["run_history"] = hist[-self.MAX_HISTORY:]
+            S.save_settings(self.state)
+        except Exception:
+            pass
+
+    def _seconds_per_unit(self) -> float | None:
+        """Median seconds per frame-pixel, or None if nothing has been timed.
+
+        Median, not mean: one run that was aborted late, or one where the
+        machine was busy, would drag an average badly and there are only ever a
+        handful of samples.
+        """
+        hist = self.state.get("run_history") or []
+        rates = []
+        for entry in hist:
+            try:
+                n, px, secs = float(entry[0]), float(entry[1]), float(entry[2])
+                if n > 0 and px > 0 and secs > 0:
+                    rates.append(secs / (n * px))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if not rates:
+            return None
+        rates.sort()
+        mid = len(rates) // 2
+        return (rates[mid] if len(rates) % 2 else
+                0.5 * (rates[mid - 1] + rates[mid]))
+
+    @staticmethod
+    def _fmt_duration(seconds: float) -> str:
+        if seconds < 90:
+            return f"{seconds:.0f} s"
+        if seconds < 5400:
+            return f"{seconds / 60:.0f} min"
+        return f"{seconds / 3600:.1f} h"
+
+    def _update_eta(self):
+        """Estimate the remaining work in this folder, from measured rates."""
+        rate = self._seconds_per_unit()
+        pending = [q for q in getattr(self, "_queue", []) if not self._is_analyzed(q)]
+        if not pending:
+            self.lbl_eta.setText("")
+            return
+        if rate is None:
+            self.lbl_eta.setText(f"{len(pending)} to do · time unknown until "
+                                 f"one run has been timed")
+            return
+        sized = [self._sizes.get(str(q)) for q in pending]
+        known = [sz for sz in sized if sz]
+        if not known:
+            self.lbl_eta.setText(f"{len(pending)} to do · measuring…")
+            return
+        total = sum(n * px for n, px in known)
+        # Unsized clips are charged the average of the ones we do know, so the
+        # figure does not silently drop the files it has not measured yet.
+        if len(known) < len(sized):
+            total += (len(sized) - len(known)) * (total / max(len(known), 1))
+        est = total * rate
+        approx = "~" if len(known) == len(sized) else "≥~"
+        self.lbl_eta.setText(f"{len(pending)} to do · {approx}"
+                             f"{self._fmt_duration(est)} remaining")
+
+    def _measure_queue_sizes(self):
+        """Read frame count and resolution for each clip, off the GUI thread.
+
+        One light ffprobe per file, header only -- a few milliseconds each, and
+        cached by path so a folder is measured once per session. It still has no
+        business happening on the GUI thread: twenty files on a network share is
+        a visible stall, and this is only ever decorating a label.
+        """
+        want = [str(q) for q in getattr(self, "_queue", [])
+                if str(q) not in self._sizes]
+        if not want:
+            self._update_eta()
+            return
+        if getattr(self, "_sizer", None) is not None and self._sizer.isRunning():
+            return
+
+        class _Sizer(QThread):
+            measured = Signal(dict)
+
+            def run(self):
+                from .ingest import quick_probe
+                out = {}
+                for path in want:
+                    if self.isInterruptionRequested():
+                        break
+                    got = quick_probe(path)
+                    if got:
+                        n, w, h = got
+                        out[path] = (n, w * h)
+                self.measured.emit(out)
+
+        self._sizer = _Sizer(self)
+        self._sizer.measured.connect(self._on_sizes)
+        self._sizer.start()
+
+    def _on_sizes(self, sizes: dict):
+        if getattr(self, "_closing", False):
+            return
+        self._sizes.update(sizes)
+        self._update_eta()
+
+    # ---- exporting a selected region -------------------------------------
+
+    def _export_selection(self):
+        """Write the highlighted window as its own set of files."""
+        res = getattr(self, "_result", None)
+        if res is None:
+            QMessageBox.information(
+                self, "Nothing to export",
+                "Run an analysis first — a region can only be exported from a "
+                "finished run, not from the live trace.")
+            return
+        ranges = self.plots.axis_ranges()
+        sel = ranges.get("selection")
+        if not sel:
+            QMessageBox.information(
+                self, "No region selected",
+                "Drag left-to-right across any plot to select a time window, "
+                "then press this again.")
+            return
+        try:
+            from .pipeline import export_subset
+            dest = pipeline_output_dir(self.outdir, self.video)
+            paths = export_subset(res, dest, sel[0], sel[1], ranges)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            self._log(f"subset export failed: {exc}")
+            return
+        self._log(f"exported {sel[0]:.2f}–{sel[1]:.2f} s to "
+                  + ", ".join(p.name for p in paths))
+        QMessageBox.information(
+            self, "Region exported",
+            f"Wrote {len(paths)} files to\n{dest}\n\n"
+            + "\n".join(p.name for p in paths))
 
     # ---- the video queue -------------------------------------------------
 
@@ -1088,6 +1298,8 @@ class MainWindow(QMainWindow):
         self.list_videos.blockSignals(False)
         self.lbl_queue_count.setText(f"{done}/{len(vids)} analyzed" if vids else "")
         self.btn_next_video.setEnabled(self._next_index() is not None)
+        self._update_eta()
+        self._measure_queue_sizes()
 
     def _next_index(self):
         vids = getattr(self, "_queue", [])
@@ -1138,6 +1350,8 @@ class MainWindow(QMainWindow):
         self.lbl_video.setText(Path(path).name)
         self._last_fit_pose = None
         self.manual_pose = None
+        self._result = None
+        self.btn_export_sel.setEnabled(False)
         if hasattr(self, "chk_manual"):
             self.chk_manual.setChecked(False)
         self.plots.reset()
@@ -1410,7 +1624,7 @@ class MainWindow(QMainWindow):
     # process if one of these is still running when it is destroyed, so they all
     # have to be accounted for on the way out -- not just the ones that are
     # obviously long-lived.
-    _WORKER_ATTRS = ("_player", "_matcher", "_update_check",
+    _WORKER_ATTRS = ("_player", "_matcher", "_update_check", "_sizer",
                      "_loader", "_preview", "_runner")
 
     def _shutdown_workers(self, ms: int = 2500):
@@ -2480,6 +2694,9 @@ class MainWindow(QMainWindow):
         # whole point is to be heard by someone who has walked away from it.
         snd.finished(self.state.get("sound_enabled", True))
         self._log(res.summary())
+        self._result = res
+        self.btn_export_sel.setEnabled(True)
+        self._record_throughput(res)
         # Swap the live raw trace for the gated, smoothed, calibrated table.
         um = (1000.0 / res.calibration_px_per_mm) if res.calibration_px_per_mm else None
         self.plots.set_table(res.table, um, "force_mn" in res.table)

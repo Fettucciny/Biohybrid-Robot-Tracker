@@ -514,6 +514,47 @@ any manual placement. Manual placement is deliberately not carried over. A pose
 measured in one clip's frame is a *worse* starting guess in the next one than no
 guess at all, because the fit would begin confidently in the wrong place.
 
+### How long is left
+
+Under the clip list is an estimate of the time remaining for the videos in this
+folder that have not been run.
+
+It is measured, not guessed. Each finished run records three numbers — frames,
+pixels per frame, and seconds — and the estimate multiplies each pending clip's
+frames by its pixel count and applies the **median** rate from your own history
+on this machine. Frame count alone does not predict runtime and neither does
+resolution; their product does, because the per-frame cost is dominated by work
+that scales with area. The median rather than the mean, because there are only
+ever a handful of samples and one run that was aborted late would drag an
+average badly.
+
+Consequently it says nothing at all until at least one run has been timed, and
+it sharpens as you work. Sizing the pending clips needs one lightweight `ffprobe`
+per file — the stream header only, a few milliseconds, cached for the session and
+run off the GUI thread, because twenty files on a network share is a visible
+stall for something that only decorates a label.
+
+What it assumes is that the clips still to do resemble the ones already done. One
+that needs far more restarts, or that keeps losing the fit, will overrun it.
+
+### Exporting just the part that matters
+
+Drag left-to-right across any plot to select a time window, then press **Export
+selected region** below the plots. It writes `tracking_subset.csv`,
+`summary_subset.png` and `run_info_subset.json` next to the full run, in the same
+per-clip folder.
+
+The selected stretch is usually the part of a recording that is actually the
+experiment — after the tissue settled, before the medium warmed, or one bout of
+contraction among several. Writing it as its own self-describing set means that
+stretch can be handed to someone else without carrying the whole clip and a note
+about which seconds mattered.
+
+One deliberate difference from a plain slice: cumulative path is re-zeroed to the
+start of the window. Left alone it would open at whatever distance the robot had
+already travelled before the window began, which is a number about the part you
+just excluded. Every other column is copied unchanged, and the JSON says so.
+
 ### A sound when it finishes
 
 A 4K run takes long enough to walk away from, so one finishes with a short
@@ -847,6 +888,17 @@ at all times — while scrubbing, during playback, and on every sixth frame duri
 the analysis itself, so a tracker that lets go shows it long before the numbers do.
 
 ---
+
+### Exported figures autoscale
+
+`summary.png` is drawn by the same code as the on-screen panel, and it honours a
+zoom you set deliberately — but only a deliberate one. It used to honour the
+panel's state unconditionally, and since the axis ranges were captured *before*
+the run, when nothing had been plotted yet, what it faithfully applied were
+matplotlib's defaults for an empty axis: 0 to 1. Every exported figure came out
+with all four panels squashed into a unit band. The panel now reports no ranges
+at all when it holds no data, and the figure only applies ranges when the panel
+says it was actually zoomed.
 
 ## Fitting the drawing's interior
 

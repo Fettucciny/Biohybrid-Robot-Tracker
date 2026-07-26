@@ -557,6 +557,14 @@ HELP: dict[str, dict] = {
             "bad one — check the fit confidence for that.",
             "Next video below the plots walks down this list, keeping your "
             "parameters and drawing and clearing the fit.",
+            "The line underneath estimates how long the unanalyzed clips will "
+            "take. It multiplies each clip's frames by its pixel count and "
+            "applies the median rate measured from your own finished runs on "
+            "this machine, so it is silent until at least one run has been "
+            "timed and it gets sharper as you work.",
+            "That estimate assumes the remaining clips resemble the ones "
+            "already done. A clip that needs far more restarts, or that keeps "
+            "losing the fit, will overrun it.",
         ],
     },
     "features": {
