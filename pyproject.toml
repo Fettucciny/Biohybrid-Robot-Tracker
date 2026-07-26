@@ -1,0 +1,49 @@
+[project]
+name = "robotrack"
+# Read from robotrack/__init__.py rather than duplicated here. That file is the
+# single source of truth the installer, the .app's Info.plist, the update
+# manifest and the release workflow all read; a second copy in this file was
+# already stale by six versions, which is what a second copy does.
+dynamic = ["version"]
+description = "GPU-accelerated video tracking of muscle-driven soft robots"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+classifiers = [
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "ezdxf>=1.1",
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]   # required for the desktop app (robotrack-gui)
+
+[project.scripts]
+robotrack = "robotrack.cli:main"
+robotrack-gui = "robotrack.gui:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "robotrack.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["robotrack*"]
+
+[tool.setuptools.package-data]
+robotrack = ["assets/*"]

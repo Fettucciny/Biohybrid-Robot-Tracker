@@ -1,0 +1,46 @@
+{
+  "_comment": "MEA Suite shared theme tokens. Canonical source: mea_theme.py. Dark indigo->teal palette; one accent per program.",
+  "palette": {
+    "INDIGO": "#16213E",
+    "TEAL": "#0D4A56",
+    "WINDOW_TOP": "#16213E",
+    "WINDOW_BOT": "#0E2A31",
+    "PANEL": "#0E1626",
+    "PANEL_HI": "#141F33",
+    "FIELD": "#0B1220",
+    "LINE": "#26374A",
+    "LINE_SOFT": "#1C2A3A",
+    "TEXT": "#E8EEF4",
+    "TEXT_MUTED": "#9FB4C8",
+    "TEXT_DIM": "#6B8299",
+    "PLOT_BG": "#0C121E",
+    "PLOT_FG": "#C7D2DE",
+    "ON_ACCENT": "#0A0E16"
+  },
+  "accents": {
+    "analyzer": "#3B82F6",
+    "explorer": "#34D399",
+    "pattern": "#DB7FFF",
+    "solar": "#FBBF24",
+    "suite": "#3B82F6"
+  },
+  "typography": {
+    "font_family": "Segoe UI",
+    "font_size_pt": 10
+  },
+  "radii_px": {
+    "card": 12,
+    "button": 8,
+    "field": 6,
+    "indicator": 4
+  },
+  "parula_anchors": [
+    "#352A87",
+    "#2058B0",
+    "#1B7EB4",
+    "#22A784",
+    "#7DD34F",
+    "#D9DA4B",
+    "#F9FB0E"
+  ]
+}

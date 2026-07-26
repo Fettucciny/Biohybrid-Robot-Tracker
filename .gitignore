@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# Build products and environments — all regenerable by build_exe.ps1
+# ---------------------------------------------------------------------------
+.venv/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# ffmpeg is downloaded automatically by build_exe.ps1 (~200 MB, and GitHub
+# rejects files over 100 MB anyway).
+launcher/bin/
+
+# ---------------------------------------------------------------------------
+# Distribution channel. These are *outputs* of tools/publish_update.py, built
+# from the source in this repo — committing them would version the same code
+# twice and go stale the moment anything here changes.
+# ---------------------------------------------------------------------------
+updates/
+
+# ---------------------------------------------------------------------------
+# Data and results. Footage is large and belongs with the experiment, not the
+# code; results are reproducible from the video plus a .rtcfg.
+# ---------------------------------------------------------------------------
+*.MOV
+*.mov
+*.mp4
+*.MP4
+TestRun/
+results/
+out*/
+
+# Local machine state
+*.rtcfg
+robotrack-selftest.log
+robotrack-error.log

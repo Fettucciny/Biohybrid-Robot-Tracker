@@ -1,0 +1,212 @@
+# NOTE: this is a *copy*. GitHub only runs workflows from .github/workflows/,
+# and that folder cannot be written by the tool that synced this file, so the
+# canonical copy lives here and has to be moved once:
+#
+#   New-Item -ItemType Directory -Force .github\workflows | Out-Null
+#   Copy-Item tools\release-workflow.yml .github\workflows\release.yml
+#
+# Do that before the first `git add .` and it goes in with everything else.
+#
+# Build robotrack for Windows and macOS and publish a GitHub Release.
+#
+# Trigger: pushing a tag that looks like a version.
+#
+#     git tag v0.10.0
+#     git push origin v0.10.0
+#
+# The tag is the only thing you touch. Everything downstream -- the installer's
+# version, the .app's Info.plist, the update manifest, the release title -- is
+# read from robotrack/__init__.py, so the job verifies that the tag and the
+# source agree and fails loudly if they do not. That check exists because the
+# one failure mode that really hurts here is a release labelled 0.10.0 whose
+# contents report 0.9.1: every installed copy then thinks it is up to date.
+#
+# Three assets are attached:
+#
+#   robotrack-<v>-code.zip     pure-Python patch, a few hundred kB. This is what
+#                              the in-app Update button normally installs.
+#   robotrack-<v>-setup.exe    full Windows installer (PyTorch + CUDA + ffmpeg).
+#   robotrack-<v>-macos.dmg    full macOS bundle, Apple Silicon.
+#
+# robotrack/update.py reads a GitHub release by these filename conventions, so
+# an installed copy pointed at `github:<owner>/<repo>` sees a new tag within
+# seconds of this workflow finishing. Nothing else needs publishing by hand.
+#
+# You can also run it without a tag from the Actions tab (workflow_dispatch) to
+# check that both platforms still build; that path attaches artifacts to the run
+# and creates no release.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # required to create the release and upload assets
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # -------------------------------------------------------------------------
+  check:
+    name: version agrees with tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - id: v
+        shell: bash
+        run: |
+          # A heredoc, not `python -c "..."`: the regex contains both quote
+          # characters, and threading those through a shell-quoted one-liner is
+          # how you get a version string that is silently empty.
+          version=$(python - <<'PY'
+          import pathlib, re
+          src = pathlib.Path("robotrack/__init__.py").read_text(encoding="utf-8")
+          print(re.search(r'__version__\s*=\s*["\']([^"\']+)', src).group(1))
+          PY
+          )
+          if [ -z "$version" ]; then echo "::error::could not read __version__"; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source version: $version"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            echo "tag version   : $tag"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::Tag v$tag does not match __version__ = $version in robotrack/__init__.py."
+              echo "::error::Bump the source, commit, then re-tag. A release whose contents"
+              echo "::error::report an older version leaves every install thinking it is current."
+              exit 1
+            fi
+          fi
+
+  # -------------------------------------------------------------------------
+  code-patch:
+    name: code patch
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: build robotrack-<version>-code.zip
+        run: python tools/publish_update.py out --code-zip-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: code-patch
+          path: out/*-code.zip
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  windows:
+    name: windows installer
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # The runner has no NVIDIA GPU, which is fine: pip installs the CUDA
+      # wheel regardless and PyInstaller freezes the CUDA runtime into the
+      # bundle. Only the build script's "no GPU visible" warning fires, and the
+      # resulting installer is identical to one built on a workstation. The
+      # self-test inside build_exe.ps1 still runs and still catches import
+      # failures, which is the class of bug freezing actually introduces.
+      - name: build
+        shell: pwsh
+        run: .\build_exe.ps1
+
+      - name: rename and size-check
+        shell: pwsh
+        run: |
+          $v = "${{ needs.check.outputs.version }}"
+          $out = "dist\robotrack-$v-setup.exe"
+          Move-Item "dist\robotrack-setup.exe" $out -Force
+          $gb = (Get-Item $out).Length / 1GB
+          Write-Host ("installer: {0}  ({1:N2} GB)" -f $out, $gb)
+          # GitHub rejects a release asset over 2 GiB outright, and the failure
+          # arrives at the very end of a 40-minute build. Fail here instead,
+          # with the fix rather than an HTTP error.
+          if ($gb -ge 2.0) {
+            Write-Host "::error::Installer is $gb GB; GitHub's release asset limit is 2 GiB."
+            Write-Host "::error::Trim the bundle (add to EXCLUDES in launcher/robotrack.spec) or"
+            Write-Host "::error::distribute this one from the shared drive and ship only the code patch here."
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/robotrack-*-setup.exe
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  macos:
+    name: macos bundle
+    needs: check
+    # macos-14 and later are Apple Silicon runners. That matters beyond
+    # convenience: PyInstaller freezes for the architecture it runs on, so an
+    # Intel runner would produce an x86_64 bundle that runs on an M1 only under
+    # Rosetta -- and Rosetta gives no MPS, which is the whole point of this
+    # build.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: build
+        run: ./build_macos.sh
+
+      - name: rename
+        run: |
+          v="${{ needs.check.outputs.version }}"
+          mv "dist/robotrack-$v.dmg" "dist/robotrack-$v-macos.dmg"
+          ls -lh dist/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/robotrack-*-macos.dmg
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  publish:
+    name: publish release
+    needs: [check, code-patch, windows, macos]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: list what will be attached
+        run: ls -lh assets/
+
+      # gh is preinstalled on the runner, so this needs no third-party action.
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ needs.check.outputs.version }}"
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "robotrack $v" \
+            --generate-notes \
+            assets/*
