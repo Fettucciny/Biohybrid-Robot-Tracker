@@ -169,8 +169,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # `bash ./script` rather than `./script`: the executable bit is a Unix
+      # file mode, and a repository whose files were committed from Windows
+      # often carries mode 100644 for everything. Invoking the interpreter
+      # explicitly makes the job independent of that, so a future contributor
+      # re-adding this file from Windows cannot break the macOS build.
       - name: build
-        run: ./build_macos.sh
+        run: bash ./build_macos.sh
 
       - name: rename
         run: |
