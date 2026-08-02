@@ -46,7 +46,13 @@ Assumptions worth knowing
 -------------------------
 * Linear elastic beam, constant cross-section, symmetric bending.
 * The legs are rigid relative to the beam and rotate about their base.
-* The muscle pulls in the plane of the beam at a fixed moment arm ``l``.
+* The muscle pulls in the plane of the beam at a fixed moment arm ``l``. This is
+  the single easiest number to get wrong and it scales the answer directly:
+  force is proportional to ``1/l``, so a 24% error in the moment arm is a 32%
+  error in every force. The default here is 1.243 mm, matching the corrected
+  ``SampleForce.m``; an earlier revision of that script carried 1.642 mm, which
+  reads about 32% low. If your numbers disagree with a MATLAB result by roughly
+  a third, this is the first thing to compare.
 * ``E`` is the hydrogel's modulus at the moment of measurement. It is the least
   certain number in the calculation by a wide margin: force scales linearly with
   it, and the modulus of a cast hydrogel varies batch to batch and drifts in
@@ -68,7 +74,7 @@ class BeamForceModel:
     thickness_mm: float = 1.1      # beam thickness, in the bending direction
     beam_width_mm: float = 1.925   # beam width
     L_mm: float = 8.25             # leg center to leg center
-    l_mm: float = 1.642            # beam neutral axis to muscle line of action
+    l_mm: float = 1.243            # beam neutral axis to muscle line of action
     leg_long_mm: float = 4.125     # legs are tapered; both ends are averaged
     leg_short_mm: float = 3.3
     resting: str = "max"           # "max" (as in the .m file) or "median"

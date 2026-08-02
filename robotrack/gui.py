@@ -498,6 +498,9 @@ class MainWindow(QMainWindow):
         # built with the remembered values rather than built and then corrected,
         # which would fire every valueChanged signal on the way past.
         self.state = S.load_settings()
+        # Known-wrong stored values, fixed before any widget reads them, and
+        # announced rather than applied quietly -- see settings.CORRECTED.
+        self._corrections = S.apply_corrections(self.state)
         self._loading_state = False
 
         # Manual placement, stored in *full-resolution* image pixels so it
@@ -557,6 +560,9 @@ class MainWindow(QMainWindow):
         self.chip_gpu.setText(dev.name if dev.accelerated else "CPU only")
         style_chip(self.chip_gpu, "ok" if dev.accelerated else "warn")
         self._log(f"device: {dev}")
+        for note in getattr(self, "_corrections", []):
+            self._log(f"corrected a saved setting — {note}")
+            self._log("  re-run any analysis whose force numbers you intend to use.")
 
         self._apply_state(self.state)
         self._on_force_method()
@@ -861,7 +867,7 @@ class MainWindow(QMainWindow):
         self.spin_t = beam_row("Beam thickness", 0.001, 100.0, 1.100, 3, " mm", "beam_geom")
         self.spin_bw = beam_row("Beam width", 0.001, 100.0, 1.925, 3, " mm", "beam_geom")
         self.spin_Lleg2leg = beam_row("Leg to leg", 0.001, 1000.0, 8.250, 3, " mm", "beam_geom")
-        self.spin_arm = beam_row("Muscle offset", 0.001, 1000.0, 1.642, 3, " mm", "beam_geom")
+        self.spin_arm = beam_row("Muscle offset", 0.001, 1000.0, 1.243, 3, " mm", "beam_geom")
         self.spin_leg_long = beam_row("Leg length (long)", 0.001, 1000.0, 4.125, 3, " mm", "beam_geom")
         self.spin_leg_short = beam_row("Leg length (short)", 0.001, 1000.0, 3.300, 3, " mm", "beam_geom")
 

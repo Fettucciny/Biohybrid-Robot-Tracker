@@ -48,7 +48,7 @@ DEFAULTS: dict[str, Any] = {
     "beam_thickness_mm": 1.100,
     "beam_width_mm": 1.925,
     "beam_leg_to_leg_mm": 8.250,
-    "beam_muscle_offset_mm": 1.642,
+    "beam_muscle_offset_mm": 1.243,
     "beam_leg_long_mm": 4.125,
     "beam_leg_short_mm": 3.300,
     "beam_resting_index": 0,
@@ -132,6 +132,39 @@ DEFAULTS: dict[str, Any] = {
 RENAMED: dict[str, str] = {
     "color_frac": "color_frac",
 }
+
+
+# Saved values that were not merely different from the new default, but wrong.
+#
+# A stored setting normally beats a new default -- that is the entire point of
+# remembering it. These are the exception: they were transcribed from a source
+# that has since been corrected, so honouring the saved copy means quietly going
+# on producing wrong numbers with no sign that anything is off. Each entry is
+# (old value, corrected value, why), and it only fires when the stored value is
+# still *exactly* the old default, i.e. nobody has deliberately typed anything.
+#
+# The change is announced in the log rather than made silently. A parameter that
+# rescales every force in your results should never move without saying so.
+CORRECTED: dict[str, tuple[float, float, str]] = {
+    "beam_muscle_offset_mm": (
+        1.642, 1.243,
+        "SampleForce.m was corrected; the moment arm scales force by 1/l, so "
+        "the old value read about 32% low"),
+}
+
+
+def apply_corrections(state: dict) -> list[str]:
+    """Fix known-wrong stored values in place. Returns notes worth logging."""
+    notes = []
+    for key, (old, new, why) in CORRECTED.items():
+        try:
+            cur = float(state.get(key))
+        except (TypeError, ValueError):
+            continue
+        if abs(cur - old) < 1e-9:
+            state[key] = new
+            notes.append(f"{key}: {old:g} → {new:g} mm — {why}")
+    return notes
 
 
 def settings_path() -> Path:

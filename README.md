@@ -744,6 +744,22 @@ magnification, and that needs a working distance Apple does not record. Between 
 parsed out of the QuickTime `keys`/`ilst` atoms (ffprobe does not surface it) and
 recorded in `run_info.json` as provenance only.
 
+### The moment arm is the number to check first
+
+`l`, the distance from the beam's neutral axis to the muscle's line of action,
+enters the formula as `1/l`. Force is therefore inversely proportional to it, and
+it is the easiest of the geometric inputs to mismeasure.
+
+The default is **1.243 mm**, matching the corrected `SampleForce.m`. An earlier
+revision of that script carried **1.642 mm**, which reads about **32% low** —
+`1.642 / 1.243 = 1.321`. If a force here disagrees with a MATLAB result by
+roughly a third, compare this number before anything else.
+
+A copy of the app that had already saved the old value corrects it once, on the
+next launch, and says so in the log rather than changing it quietly. Anything you
+typed yourself is left alone — the correction only fires on a value still sitting
+at the old default.
+
 ### Force: a measured curve, or beam mechanics
 
 Two methods, selectable under **Force**.
