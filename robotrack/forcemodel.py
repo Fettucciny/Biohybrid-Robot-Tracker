@@ -68,13 +68,23 @@ import numpy as np
 
 @dataclass
 class BeamForceModel:
-    """Beam-bending force model. Defaults are the values in ``SampleForce.m``."""
+    """Beam-bending force model.
+
+    The defaults are the measured geometry of the current bio-bot design, which
+    is **not** the geometry hard-coded in ``SampleForce.m``: that script carries
+    a 1.925 mm beam width and an 8.25 mm leg spacing, against 3.025 mm and
+    8.03 mm here. Those two differences alone make this model report 62% more
+    force than the script for the same measured deflection, so a comparison
+    between the two is meaningless unless both are set to the same numbers.
+    Every field is editable in the Force card precisely because this geometry
+    belongs to a robot design rather than to the method.
+    """
 
     E_pa: float = 293e3            # Young's modulus of the beam material
     thickness_mm: float = 1.1      # beam thickness, in the bending direction
-    beam_width_mm: float = 1.925   # beam width
-    L_mm: float = 8.25             # leg center to leg center
-    l_mm: float = 1.243            # beam neutral axis to muscle line of action
+    beam_width_mm: float = 3.025   # beam width
+    L_mm: float = 8.03             # leg center to leg center
+    l_mm: float = 1.238            # beam neutral axis to muscle line of action
     leg_long_mm: float = 4.125     # legs are tapered; both ends are averaged
     leg_short_mm: float = 3.3
     resting: str = "max"           # "max" (as in the .m file) or "median"

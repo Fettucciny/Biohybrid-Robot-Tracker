@@ -46,9 +46,9 @@ DEFAULTS: dict[str, Any] = {
     # Beam model, defaulting to the values in SampleForce.m
     "beam_E_kpa": 293.0,
     "beam_thickness_mm": 1.100,
-    "beam_width_mm": 1.925,
-    "beam_leg_to_leg_mm": 8.250,
-    "beam_muscle_offset_mm": 1.243,
+    "beam_width_mm": 3.025,
+    "beam_leg_to_leg_mm": 8.030,
+    "beam_muscle_offset_mm": 1.238,
     "beam_leg_long_mm": 4.125,
     "beam_leg_short_mm": 3.300,
     "beam_resting_index": 0,
@@ -120,6 +120,9 @@ DEFAULTS: dict[str, Any] = {
     # a borrowed .rtcfg should not import someone else's timings.
     "run_history": [],
 
+    # --- appearance ------------------------------------------------------
+    "theme_mode": "dark",           # "dark" or "light"
+
     # --- window ----------------------------------------------------------
     "window_geometry": "",          # base64 QByteArray from saveGeometry()
 }
@@ -147,7 +150,7 @@ RENAMED: dict[str, str] = {
 # rescales every force in your results should never move without saying so.
 CORRECTED: dict[str, tuple[float, float, str]] = {
     "beam_muscle_offset_mm": (
-        1.642, 1.243,
+        1.642, 1.238,
         "SampleForce.m was corrected; the moment arm scales force by 1/l, so "
         "the old value read about 32% low"),
 }

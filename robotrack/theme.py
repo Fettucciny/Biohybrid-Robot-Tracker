@@ -28,6 +28,8 @@ accent never has to compete with an alarm.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QCursor, QFont
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy,
@@ -41,6 +43,88 @@ from . import mea_theme as M
 
 ACCENT_NAME = "myo"
 ACCENT = "#FF5470"          # crimson-rose
+
+# --------------------------------------------------------------------------
+# Light mode
+#
+# The kit is a dark theme and its constants are module-level, which is fine
+# until someone wants to work next to a window. Rather than fork the kit or
+# string-replace hex values out of generated QSS -- which silently misses every
+# derived tint, and there are several -- the light palette is applied by
+# swapping those constants for the duration of each call that reads them. The
+# kit then generates a correct light stylesheet, palette and rcParams using its
+# own logic, including the hover and pressed tints it computes on the fly.
+#
+# The accent does not change between modes. #FF5470 has enough chroma to read
+# on both surfaces, and an app that changes its identity colour when you flip a
+# switch looks like two different programs.
+# --------------------------------------------------------------------------
+
+LIGHT_SURFACES = {
+    "INDIGO":     "#EEF3F8",
+    "TEAL":       "#E2ECEF",
+    "WINDOW_TOP": "#EEF3F8",
+    "WINDOW_BOT": "#E2ECEF",
+    "PANEL":      "#FFFFFF",
+    "PANEL_HI":   "#F1F5FA",
+    "FIELD":      "#FFFFFF",
+    "LINE":       "#C4D0DD",
+    "LINE_SOFT":  "#E3EAF2",
+    "TEXT":       "#16202C",
+    "TEXT_MUTED": "#4C5D70",
+    "TEXT_DIM":   "#7B8B9C",
+    "PLOT_BG":    "#FFFFFF",
+    "PLOT_FG":    "#33445A",
+}
+
+# Status colors need their own light steps. Emerald #34D399 and amber #FBBF24
+# are chosen to sit on a near-black surface; on white they fall to roughly 1.9:1
+# and 1.7:1, well under the 3:1 a non-text mark needs, so a "confident fit"
+# chip would be a pale smear. These are the darker steps of the same hues.
+LIGHT_STATUS = {"ok": "#0E9F6E", "warn": "#B45309"}
+
+MODE = "dark"
+
+
+@contextmanager
+def _kit_palette(mode: str):
+    """Run a block with the kit's constants set to ``mode``."""
+    if mode != "light":
+        yield
+        return
+    saved = {k: getattr(M, k) for k in LIGHT_SURFACES}
+    for k, v in LIGHT_SURFACES.items():
+        setattr(M, k, v)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(M, k, v)
+
+
+def set_mode(mode: str) -> str:
+    """Switch the token table. Returns the mode actually set."""
+    global MODE
+    MODE = "light" if str(mode).lower() == "light" else "dark"
+    light = MODE == "light"
+    # Mutated in place, never rebound: every module did ``from .theme import C``
+    # at import time and holds this exact dict.
+    C.update({
+        "panel":     LIGHT_SURFACES["PANEL"]      if light else M.PANEL,
+        "panel_hi":  LIGHT_SURFACES["PANEL_HI"]   if light else M.PANEL_HI,
+        "field":     LIGHT_SURFACES["FIELD"]      if light else M.FIELD,
+        "line":      LIGHT_SURFACES["LINE"]       if light else M.LINE,
+        "line_soft": LIGHT_SURFACES["LINE_SOFT"]  if light else M.LINE_SOFT,
+        "text":      LIGHT_SURFACES["TEXT"]       if light else M.TEXT,
+        "muted":     LIGHT_SURFACES["TEXT_MUTED"] if light else M.TEXT_MUTED,
+        "dim":       LIGHT_SURFACES["TEXT_DIM"]   if light else M.TEXT_DIM,
+        "plot_bg":   LIGHT_SURFACES["PLOT_BG"]    if light else M.PLOT_BG,
+        "plot_fg":   LIGHT_SURFACES["PLOT_FG"]    if light else M.PLOT_FG,
+        "ok":        LIGHT_STATUS["ok"]   if light else M.ACCENTS["explorer"],
+        "warn":      LIGHT_STATUS["warn"] if light else M.ACCENTS["solar"],
+    })
+    return MODE
+
 
 # Shared tokens, re-exported so app code never hardcodes a hex value.
 C = {
@@ -88,6 +172,21 @@ QLabel#Chip {{
     color: {M.TEXT_MUTED};
     font-size: 9pt;
 }}
+
+/* ---- cards ---- */
+QFrame#card {{
+    background: {M.PANEL};
+    border: 1px solid {M.LINE};
+    border-radius: 12px;
+    margin-top: 0; padding: 0;
+}}
+QFrame#helpCard {{
+    background: {M.PANEL};
+    border: 1px solid {ACCENT};
+    border-radius: 12px;
+    margin-top: 0; padding: 0;
+}}
+QFrame#cardRule {{ background: {M.LINE}; border: none; }}
 
 /* ---- card titles (we use QFrame#card, not QGroupBox, for tighter control) ---- */
 QLabel#CardTitle {{
@@ -151,30 +250,42 @@ QScrollArea {{ background: transparent; border: none; }}
 
 
 def stylesheet() -> str:
-    return M.qss(ACCENT) + _extra_qss()
+    with _kit_palette(MODE):
+        return M.qss(ACCENT) + _extra_qss()
 
 
-def apply(app) -> None:
-    """Apply palette, fonts and stylesheet. Call once after QApplication."""
+def apply(app, mode: str | None = None) -> None:
+    """Apply palette, fonts and stylesheet. Safe to call again to switch mode."""
+    if mode is not None:
+        set_mode(mode)
     app.setStyle("Fusion")
-    M.apply_qt(app, ACCENT)          # shared palette + base stylesheet
+    with _kit_palette(MODE):
+        M.apply_qt(app, ACCENT)      # shared palette + base stylesheet
     app.setStyleSheet(stylesheet())  # plus robotrack's own components
 
 
 def matplotlib_rc() -> dict:
-    """Themed rcParams for the summary figure, from the shared kit."""
-    return M.matplotlib_rc()
+    """Themed rcParams for figures, following the current mode."""
+    with _kit_palette(MODE):
+        return M.matplotlib_rc()
 
 
 def series_colors() -> list[str]:
-    """Line colors for plots.
+    """Line colors for plots — accent, blue, amber, then a muted grey.
 
-    The accent leads, then two well-separated parula stops. Using the shared
-    colormap for series keeps figures recognisably part of the suite without
-    inventing a private chart palette.
+    The previous set took two stops off the shared parula colormap, which looked
+    of a piece with the suite and was, on measurement, close to unusable: the
+    accent against the parula green separated by ΔE 2.0 under deuteranopia, so
+    the two curves on the movement panel were the same colour for a red-green
+    colourblind reader. Blue and amber against the accent measure 20.7, and the
+    same three work on both surfaces, so the modes do not diverge.
+
+    The accent sits slightly outside the validator's lightness band. That is a
+    deliberate exception: it is the product's identity colour, fixed elsewhere,
+    and every separation check passes with it in place.
     """
-    p = M.parula(256)
-    return [ACCENT, p[150], p[60], M.TEXT_MUTED]
+    return [ACCENT, "#3B82F6", "#D97706",
+            LIGHT_SURFACES["TEXT_MUTED"] if MODE == "light" else M.TEXT_MUTED]
 
 
 # --------------------------------------------------------------------------
@@ -194,10 +305,7 @@ class HelpPopup(QFrame):
 
     def __init__(self, spec: dict, parent: QWidget | None = None):
         super().__init__(parent, Qt.Popup)
-        self.setObjectName("card")          # picks up the kit's card styling
-        self.setStyleSheet(
-            f"QFrame#card {{ background: {M.PANEL}; border: 1px solid {ACCENT};"
-            f" border-radius: 12px; margin-top: 0; padding: 0; }}")
+        self.setObjectName("helpCard")      # accent-bordered variant of a card
 
         width = spec.get("width", self.WIDTH)
         inner = width - 2 * self.MARGIN
@@ -288,10 +396,11 @@ class Card(QFrame):
 
     def __init__(self, title: str, parent: QWidget | None = None):
         super().__init__(parent)
+        # Styled from the application stylesheet, deliberately. A per-widget
+        # setStyleSheet wins over the app's, so cards that carried their own
+        # background stayed dark navy forever -- a light-mode window with a
+        # column of dark cards in it, which is exactly what happened.
         self.setObjectName("card")
-        self.setStyleSheet(
-            f"QFrame#card {{ background: {M.PANEL}; border: 1px solid {M.LINE};"
-            f" border-radius: 12px; margin-top: 0; padding: 0; }}")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 12, 14, 13)
         outer.setSpacing(9)
@@ -301,8 +410,8 @@ class Card(QFrame):
         outer.addWidget(head)
 
         rule = QFrame()
+        rule.setObjectName("cardRule")
         rule.setFixedHeight(1)
-        rule.setStyleSheet(f"background: {M.LINE}; border: none;")
         outer.addWidget(rule)
 
         self.body = QVBoxLayout()
@@ -333,9 +442,16 @@ class Card(QFrame):
 
 
 def style_chip(lab: QLabel, kind: str = "") -> None:
-    """Recolor a status chip. ``kind`` is '', 'ok' or 'warn' -- never red."""
-    col = {"ok": C["ok"], "warn": C["warn"]}.get(kind, M.TEXT_MUTED)
-    border = col if kind else M.LINE
+    """Recolor a status chip. ``kind`` is '', 'ok' or 'warn' -- never red.
+
+    Reads its surfaces from ``C`` rather than from the kit's module constants,
+    because this is called at runtime -- on every device probe and every clip
+    load -- rather than while the stylesheet is being generated. Outside that
+    context the kit's constants are always the dark ones, which is how a light
+    window ended up with black status pills in its header.
+    """
+    col = {"ok": C["ok"], "warn": C["warn"]}.get(kind, C["muted"])
+    border = col if kind else C["line"]
     lab.setStyleSheet(
-        f"background:{M.FIELD}; border:1px solid {border}; border-radius:10px;"
+        f"background:{C['field']}; border:1px solid {border}; border-radius:10px;"
         f" padding:3px 10px; font-size:9pt; color:{col};")

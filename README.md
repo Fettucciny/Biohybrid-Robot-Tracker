@@ -571,6 +571,31 @@ path is best-effort and silent on failure; a machine with no audio device must
 not take a run down with it. Turn it off by unsetting **sound** in the settings
 file, or set `ROBOTRACK_NO_SOUND=1`.
 
+### Dark and light
+
+The button in the header switches between them and the choice is remembered. The
+accent stays the same in both — an application that changes its identity colour
+when you flip a switch reads as two different programs.
+
+The switch is live, and three things do not come along for free with a Qt
+stylesheet, so they are handled explicitly: the OpenCV overlays are drawn with
+BGR tuples read from the token table, matplotlib bakes its rcParams into artists
+when they are created rather than when they are drawn, and status chips carry a
+per-widget stylesheet. All three are refreshed on a switch; miss any one and a
+light window keeps dark-theme marks on it.
+
+The light palette is applied by temporarily swapping the theme kit's own module
+constants, so the kit generates a correct light stylesheet using its existing
+logic — including the hover and pressed tints it computes on the fly. Rewriting
+hex values in the generated output would have missed every one of those.
+
+While adding it, the plot series palette turned out to be failing a
+colour-vision check badly: the accent against the old parula green separated by
+ΔE 2.0 under deuteranopia, meaning the two curves sharing the movement panel
+were the same colour for a red-green colourblind reader. The series are now
+accent, blue and amber, which measure ΔE 20.7 at worst and pass on both
+surfaces.
+
 ### Small things that stop mistakes
 
 The scroll wheel no longer changes parameter values. Scrolling down a long
@@ -743,6 +768,25 @@ magnification, and that needs a working distance Apple does not record. Between 
 60 mm and a 300 mm standoff the answer spans 84 to 464 µm/px. The lens data is
 parsed out of the QuickTime `keys`/`ilst` atoms (ffprobe does not surface it) and
 recorded in `run_info.json` as provenance only.
+
+### The defaults are one robot's geometry, not a universal constant
+
+The Force card ships with the measured geometry of the current bio-bot design:
+E 293 kPa, beam 1.100 × 3.025 mm, leg-to-leg 8.03 mm, muscle offset 1.238 mm,
+legs 4.125 and 3.300 mm. That works out to **19 778 µN per radian** of leg
+rotation.
+
+Two of those differ from the values hard-coded in `SampleForce.m`, which carries
+a **1.925 mm** beam width and an **8.25 mm** leg spacing. Beam width enters
+through `I = t³w/12` and leg spacing divides, so the pair of them make this model
+report **62% more force** than that script for an identical measured
+deflection. Comparing a number from here against a number from there is
+meaningless unless both are set to the same geometry — check that first, before
+concluding anything about the tracking.
+
+Every field is editable because these belong to a robot design rather than to the
+method. If your devices are cast from a different mould, measure them and type
+them in; the numbers above are a starting point, not a constant of nature.
 
 ### The moment arm is the number to check first
 

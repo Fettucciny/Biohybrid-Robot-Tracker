@@ -53,7 +53,8 @@ from .segment import (ColorModel, SegmentConfig, choose_color_model, color_dista
                       build_background, largest_component, segment_color,
                       segment_frame)
 from .shape import measure_mask
-from .theme import ACCENT, C, Card, HelpBadge, apply as apply_theme, style_chip
+from .theme import (ACCENT, C, Card, HelpBadge, apply as apply_theme,
+                    set_mode as set_theme_mode, style_chip)
 from .updater_ui import UpdateDialog
 
 
@@ -79,6 +80,28 @@ def _bgr(hex_color: str) -> tuple[int, int, int]:
 
 OK_BGR = _bgr(C["ok"])        # confident fit
 WARN_BGR = _bgr(C["warn"])    # low confidence
+
+
+def _claim_taskbar_identity() -> None:
+    """Tell Windows this process is its own application.
+
+    Without an explicit AppUserModelID, Windows groups the window under the host
+    executable and shows *that* file's embedded icon on the taskbar, ignoring
+    setWindowIcon entirely. Setting one makes the window's own icon
+    authoritative -- which is what lets an icon shipped in a code patch appear
+    without rebuilding the .exe.
+
+    Windows-only and entirely optional; any failure just leaves the previous
+    behaviour.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "org.biohybridlab.robotrack")
+    except Exception:
+        pass
 
 
 def _draw_conf_badge(img: np.ndarray, conf: float) -> None:
@@ -460,6 +483,7 @@ class NoWheel(QObject):
 class MainWindow(QMainWindow):
     def __init__(self, startup_warning: str | None = None):
         super().__init__()
+        _claim_taskbar_identity()
         self.setWindowTitle(f"{APP_NAME} — muscle-driven soft robot tracking")
         self.resize(1480, 940)
         try:
@@ -619,8 +643,8 @@ class MainWindow(QMainWindow):
         lay.setSpacing(10)
 
         dot = QLabel("❮❯"); dot.setObjectName("AppMark")
-        name = QLabel("robotrack"); name.setObjectName("AppName")
-        tag = QLabel("muscle-driven robot kinematics"); tag.setObjectName("Tagline")
+        name = QLabel(APP_NAME); name.setObjectName("AppName")
+        tag = QLabel("muscle-driven soft robot kinematics"); tag.setObjectName("Tagline")
         lay.addWidget(dot); lay.addWidget(name); lay.addSpacing(4); lay.addWidget(tag)
         lay.addStretch(1)
 
@@ -635,6 +659,13 @@ class MainWindow(QMainWindow):
         for c in (self.chip_rate, self.chip_mode, self.chip_key, self.chip_gpu,
                   self.chip_version):
             lay.addWidget(c)
+
+        self.btn_theme = QPushButton("")
+        self.btn_theme.setObjectName("Ghost")
+        self.btn_theme.setFixedWidth(64)
+        self.btn_theme.clicked.connect(self._toggle_theme)
+        self._sync_theme_button()
+        lay.addWidget(self.btn_theme)
 
         self.btn_update = QPushButton("Update")
         self.btn_update.setObjectName("Ghost")
@@ -865,9 +896,9 @@ class MainWindow(QMainWindow):
 
         self.spin_E = beam_row("Young's modulus", 0.1, 1e6, 293.0, 1, " kPa", "beam_E")
         self.spin_t = beam_row("Beam thickness", 0.001, 100.0, 1.100, 3, " mm", "beam_geom")
-        self.spin_bw = beam_row("Beam width", 0.001, 100.0, 1.925, 3, " mm", "beam_geom")
-        self.spin_Lleg2leg = beam_row("Leg to leg", 0.001, 1000.0, 8.250, 3, " mm", "beam_geom")
-        self.spin_arm = beam_row("Muscle offset", 0.001, 1000.0, 1.243, 3, " mm", "beam_geom")
+        self.spin_bw = beam_row("Beam width", 0.001, 100.0, 3.025, 3, " mm", "beam_geom")
+        self.spin_Lleg2leg = beam_row("Leg to leg", 0.001, 1000.0, 8.030, 3, " mm", "beam_geom")
+        self.spin_arm = beam_row("Muscle offset", 0.001, 1000.0, 1.238, 3, " mm", "beam_geom")
         self.spin_leg_long = beam_row("Leg length (long)", 0.001, 1000.0, 4.125, 3, " mm", "beam_geom")
         self.spin_leg_short = beam_row("Leg length (short)", 0.001, 1000.0, 3.300, 3, " mm", "beam_geom")
 
@@ -2180,6 +2211,61 @@ class MainWindow(QMainWindow):
             dlg.check()
         dlg.exec()
 
+    # ---- appearance ------------------------------------------------------
+
+    def _sync_theme_button(self):
+        light = self.state.get("theme_mode", "dark") == "light"
+        # A word rather than a sun/moon glyph: those characters are not in every
+        # Windows UI font and fall back to a box or the wrong shape, and the
+        # button is the one control whose whole job is to be legible.
+        # The label names what pressing it gives you, not what you are in.
+        self.btn_theme.setText("Dark" if light else "Light")
+        self.btn_theme.setToolTip("Switch to dark mode" if light else
+                                  "Switch to light mode")
+
+    def _toggle_theme(self):
+        mode = "light" if self.state.get("theme_mode", "dark") == "dark" else "dark"
+        self.state["theme_mode"] = mode
+        self._apply_theme_mode(mode)
+        S.save_settings(self.state)
+
+    def _apply_theme_mode(self, mode: str):
+        """Restyle everything that cached a color at construction time.
+
+        A Qt stylesheet reaches every widget, but three things here do not go
+        through it: the OpenCV overlays are drawn with BGR tuples read from the
+        token table at import, matplotlib bakes rcParams into artists when they
+        are created, and the placement view holds its own accent. All three have
+        to be told, or a switch leaves dark-theme marks on a light window.
+        """
+        global OK_BGR, WARN_BGR
+        set_theme_mode(mode)
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, mode)
+        OK_BGR, WARN_BGR = _bgr(C["ok"]), _bgr(C["warn"])
+        # Chips carry a per-widget stylesheet set at runtime, so they need
+        # repainting explicitly with whatever state they are currently in.
+        dev = get_device(self.chk_gpu.isChecked() if hasattr(self, "chk_gpu") else True)
+        style_chip(self.chip_gpu, "ok" if dev.accelerated else "warn")
+        style_chip(self.chip_rate, "warn" if (self.info and self.info.is_vfr) else
+                   ("ok" if self.info else ""))
+        style_chip(self.chip_key, "ok" if (self.model and self.model.mode == "color") else "")
+        style_chip(self.chip_mode, "")
+        style_chip(self.chip_version, "")
+        try:
+            self.view.set_accent(ACCENT)
+        except Exception:
+            pass
+        try:
+            self.plots.retheme()
+        except Exception:
+            pass
+        self._sync_theme_button()
+        # Redraw the frame so its overlay picks up the new state colors.
+        if self.reader is not None:
+            self._render_preview()
+
     def _check_updates_quietly(self):
         """Ask the channel whether anything is newer, without blocking or asking.
 
@@ -2731,7 +2817,12 @@ def main(argv=None, startup_warning: str | None = None, splash: bool = True) -> 
         return run_with_splash(argv if argv is not None else sys.argv,
                                startup_warning=startup_warning)
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
-    apply_theme(app)
+    # Read the saved mode before any widget exists: restyling afterwards works,
+    # but the window would visibly flash from dark to light on every launch.
+    try:
+        apply_theme(app, S.load_settings().get("theme_mode", "dark"))
+    except Exception:
+        apply_theme(app)
     w = MainWindow(startup_warning=startup_warning)
     w.show()
     return app.exec()

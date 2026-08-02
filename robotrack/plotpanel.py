@@ -268,6 +268,21 @@ class PlotPanel(QWidget):
         self._timer.stop()
         self._redraw()
 
+    def retheme(self):
+        """Rebuild the figure under the current theme mode.
+
+        matplotlib bakes rcParams into artists when they are created, so a
+        already-drawn figure keeps its old face, tick and label colours no
+        matter what the stylesheet does. The cheapest correct answer is to set
+        the new rcParams and rebuild, then redraw the data.
+        """
+        matplotlib.rcParams.update(matplotlib_rc())
+        self.fig.set_facecolor(THEME["plot_bg"])
+        self.canvas.setStyleSheet(f"background-color: {THEME['plot_bg']};")
+        self._build()
+        self._redraw()
+        self._draw_selection()
+
     def reset(self):
         """Empty the panel, for when a different clip is loaded.
 

@@ -105,7 +105,13 @@ def run_with_splash(argv, startup_warning: str | None = None) -> int:
     app = QApplication(argv)
 
     from .theme import apply as apply_theme
-    apply_theme(app)
+    # Same reason as in gui.main: pick the saved mode up front so the splash and
+    # the window that follows it are the same colour.
+    try:
+        from .settings import load_settings
+        apply_theme(app, load_settings().get("theme_mode", "dark"))
+    except Exception:
+        apply_theme(app)
 
     splash = Splash(total_steps=7)
     splash.show()

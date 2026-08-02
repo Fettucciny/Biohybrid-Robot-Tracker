@@ -29,9 +29,9 @@ def main(argv=None) -> int:
                    help="compute force from beam mechanics instead of a LUT")
     p.add_argument("--beam-E-kpa", type=float, default=293.0)
     p.add_argument("--beam-thickness", type=float, default=1.1, metavar="MM")
-    p.add_argument("--beam-width", type=float, default=1.925, metavar="MM")
-    p.add_argument("--beam-leg-to-leg", type=float, default=8.25, metavar="MM")
-    p.add_argument("--beam-offset", type=float, default=1.243, metavar="MM")
+    p.add_argument("--beam-width", type=float, default=3.025, metavar="MM")
+    p.add_argument("--beam-leg-to-leg", type=float, default=8.03, metavar="MM")
+    p.add_argument("--beam-offset", type=float, default=1.238, metavar="MM")
     p.add_argument("--beam-leg-long", type=float, default=4.125, metavar="MM")
     p.add_argument("--beam-leg-short", type=float, default=3.3, metavar="MM")
     p.add_argument("--dxf-loop", type=int, default=0, metavar="N",
