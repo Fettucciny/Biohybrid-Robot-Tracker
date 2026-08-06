@@ -373,12 +373,12 @@ and want to ship 0.11.0:
 # 1. Open robotrack\__init__.py and change __version__ to "0.11.0". Save.
 
 # 2. Snapshot and upload the changes
-git commit -am "v0.11.0"
-git push
 
 # 3. Tag it, which starts the build
-git tag v0.11.0
-git push origin v0.11.0
+git commit -am "v0.16.0"
+git push
+git tag v0.16.0
+git push origin v0.16.0
 ```
 
 `git commit -am` is `git add` and `git commit` combined, for files git already
