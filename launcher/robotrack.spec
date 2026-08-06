@@ -40,7 +40,9 @@ datas, binaries, hiddenimports = [], [], []
 
 # Packages that ship data files or import submodules dynamically, which
 # PyInstaller's static analysis cannot follow on its own.
-for pkg in ("torch", "cv2", "ezdxf", "scipy", "matplotlib", "pandas"):
+# certifi carries the CA bundle the updater needs to verify HTTPS inside a
+# frozen app -- without it, macOS builds cannot reach a GitHub channel.
+for pkg in ("torch", "cv2", "ezdxf", "scipy", "matplotlib", "pandas", "certifi"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -50,7 +52,7 @@ for pkg in ("torch", "cv2", "ezdxf", "scipy", "matplotlib", "pandas"):
         print(f"[spec] skipping {pkg}: {exc}")
 
 hiddenimports += collect_submodules("robotrack")
-hiddenimports += ["matplotlib.backends.backend_agg", "scipy.signal"]
+hiddenimports += ["matplotlib.backends.backend_agg", "scipy.signal", "certifi"]
 
 # Splash artwork and icon. robotrack.splash resolves these relative to the
 # package directory, so they must land inside it rather than at the bundle root.

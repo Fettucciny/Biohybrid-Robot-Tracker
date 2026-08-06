@@ -567,6 +567,60 @@ HELP: dict[str, dict] = {
             "losing the fit, will overrun it.",
         ],
     },
+    "roi": {
+        "title": "Region of interest",
+        "short": "Track only inside a rectangle you draw on the video.",
+        "what": "Restricts both the color model and the mask to the rectangle. "
+                "Everything outside it is dimmed on screen and ignored entirely "
+                "by the analysis. The rectangle is stored in full-resolution "
+                "pixels, so it stays put when you change the decode scale.",
+        "guidance": [
+            "Draw one whenever something outside the dish is brighter or more "
+            "saturated than the robot. The color model picks the background as "
+            "the commonest hue and the robot as the farthest populated hue from "
+            "it — a lamp reflection, a dish rim or the bench beyond the well "
+            "will win that contest simply for being far away and numerous, and "
+            "the fit then locks onto it.",
+            "It narrows the color *estimate*, not just the mask. That is the "
+            "part that matters: clipping a bad mask leaves a bad threshold, "
+            "while estimating inside the region gives the medium and the robot "
+            "their real separation.",
+            "Leave a margin. A region drawn tight against the robot clips it "
+            "the moment it moves, and a clipped silhouette measures short.",
+            "The shading shows what you excluded rather than hiding it, so a "
+            "region that has cut the robot in half is obvious instead of "
+            "looking like a tracking failure.",
+        ],
+    },
+    "appearance": {
+        "title": "Appearance lock",
+        "short": "Track the robot by aligning how it looks, instead of by "
+                 "thresholding its color.",
+        "what": "Takes a patch of the frame you are currently looking at, "
+                "inside the region you drew, and finds the rotation, "
+                "translation and two scales that best align it to every "
+                "later frame. The length scale it recovers is the "
+                "measurement. It optimises correlation, so a change in "
+                "lighting or exposure moves it hardly at all.",
+        "guidance": [
+            "Use it when color keying cannot work — when the robot and the "
+            "medium overlap in every channel, or something outside the dish "
+            "is brighter than the robot. On such footage the per-pixel "
+            "separability measures around 1.4 where a threshold needs above "
+            "2, while the spatial pattern is unmistakable.",
+            "Draw a region first, and scrub to a frame where the robot is "
+            "clearly visible and the fit is good. That frame is what gets "
+            "learned; everything after is measured relative to it.",
+            "With a DXF placed on the reference frame the results are "
+            "absolute — micrometers, force, the lot. Without one the scales "
+            "are ratios, so strain, frequency and the trajectory are right "
+            "but absolute size is withheld rather than guessed.",
+            "It follows whatever you pointed it at. Aim it at a bubble and it "
+            "will track the bubble faithfully and report high confidence "
+            "doing it — the confidence is the correlation, which says the "
+            "alignment is good, not that the target was the right one.",
+        ],
+    },
     "features": {
         "title": "Fit interior features",
         "short": "Also match the drawing's holes, windows and beams, not just its silhouette.",

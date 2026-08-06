@@ -1,4 +1,4 @@
-"""robotrack's visual identity, built on the shared MEA Suite theme kit.
+"""The application's visual identity, built on a vendored theme kit.
 
 The kit's rule for a new program is that the neutrals, gradient, radii,
 typography and plot colormap stay identical across the family, and **only the
@@ -12,7 +12,7 @@ The accent
 
 * It is the furthest available hue from the four existing accents (53 degrees to
   the nearest, ``solar`` amber; 67 degrees to ``pattern`` magenta), so the
-  program is identifiable at a glance across a taskbar of suite windows.
+  program is identifiable at a glance in a crowded taskbar.
 * Contrast against the on-accent near-black is 6.21:1, above the 4.5:1 AA
   threshold the kit's dark-text-on-accent rule requires, and comfortably above
   ``analyzer`` blue's 5.25:1.
@@ -173,6 +173,28 @@ QLabel#Chip {{
     font-size: 9pt;
 }}
 
+/* ---- message boxes ----
+   Styled explicitly, on every platform, because the generic QDialog rule does
+   not reliably reach them on macOS: the dialog keeps a system-drawn light
+   background while the global `color` from the kit stays near-white, and the
+   message renders white-on-white. What the user sees is an empty box with a
+   warning icon in it -- which is exactly the bug this fixes, and it hid the
+   text of every error the app tried to report. */
+QMessageBox {{
+    background: {M.PANEL};
+}}
+QMessageBox QLabel {{
+    color: {M.TEXT};
+    background: transparent;
+    font-size: 10pt;
+}}
+QMessageBox QTextEdit {{
+    color: {M.TEXT};
+    background: {M.FIELD};
+    border: 1px solid {M.LINE};
+}}
+QMessageBox QPushButton {{ min-width: 88px; }}
+
 /* ---- cards ---- */
 QFrame#card {{
     background: {M.PANEL};
@@ -274,7 +296,7 @@ def series_colors() -> list[str]:
     """Line colors for plots — accent, blue, amber, then a muted grey.
 
     The previous set took two stops off the shared parula colormap, which looked
-    of a piece with the suite and was, on measurement, close to unusable: the
+    of a piece with the kit and was, on measurement, close to unusable: the
     accent against the parula green separated by ΔE 2.0 under deuteranopia, so
     the two curves on the movement panel were the same colour for a red-green
     colourblind reader. Blue and amber against the accent measure 20.7, and the

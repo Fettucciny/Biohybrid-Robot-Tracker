@@ -23,7 +23,8 @@ import time
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QDoubleSpinBox, QHBoxLayout, QLabel,
+                               QSizePolicy, QVBoxLayout, QWidget)
 
 import matplotlib
 matplotlib.use("QtAgg")
@@ -116,6 +117,46 @@ def decimate(t: np.ndarray, ys: list, max_points: int = 1400):
     return t[idx], [None if y is None else y[idx] for y in ys]
 
 
+def resampled_path(t: np.ndarray, cx: np.ndarray, cy: np.ndarray,
+                   hz: float | None) -> np.ndarray:
+    """Cumulative path length measured at ``hz``, not at the frame rate.
+
+    Path length is a sum of step distances, and every step is the true motion
+    plus the tracker's own noise. Noise never cancels in that sum: two positions
+    that are really identical still contribute ``|jitter|`` to the total, so the
+    path grows roughly with the *number of samples* even when the robot is
+    stationary. At 60 fps that is 60 spurious contributions a second, and it is
+    why a path-slope speed reads high while net displacement does not.
+
+    Taking the centroid at a lower rate keeps the real trajectory -- a robot
+    that moves millimetres per minute is not doing anything interesting between
+    consecutive 60 Hz frames -- while cutting the number of noise contributions
+    in proportion. Halving the rate roughly halves the jitter contribution and
+    leaves genuine displacement untouched.
+
+    Passing ``None`` keeps every frame, which is the old behaviour.
+    """
+    ok = np.isfinite(t) & np.isfinite(cx) & np.isfinite(cy)
+    if ok.sum() < 2:
+        return np.full(t.shape, np.nan)
+    ts, xs, ys = t[ok], cx[ok], cy[ok]
+    if hz and hz > 0:
+        # Nearest real sample at each grid time, rather than interpolation:
+        # interpolating between two noisy points invents a position that was
+        # never measured, and averages the noise in a way that flatters the
+        # result. Nearest keeps every reported point an actual observation.
+        span = float(ts[-1] - ts[0])
+        n = int(np.floor(span * hz)) + 1
+        if n >= 2 and n < ts.size:
+            grid = ts[0] + np.arange(n) / hz
+            idx = np.unique(np.searchsorted(ts, grid).clip(0, ts.size - 1))
+            ts, xs, ys = ts[idx], xs[idx], ys[idx]
+    step = np.hypot(np.diff(xs), np.diff(ys))
+    cum = np.concatenate([[0.0], np.cumsum(step)])
+    # Back onto the original time base so it can be plotted against the rest.
+    return np.interp(t, ts, cum, left=np.nan, right=cum[-1])
+
+
 def slope_per_min(t: np.ndarray, y: np.ndarray) -> float:
     """Least-squares slope in units per minute."""
     ok = np.isfinite(t) & np.isfinite(y)
@@ -143,7 +184,34 @@ class PlotPanel(QWidget):
         self.canvas.setMinimumWidth(300)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.canvas)
+        lay.setSpacing(6)
+        lay.addWidget(self.canvas, 1)
+
+        row = QWidget(); rl = QHBoxLayout(row)
+        rl.setContentsMargins(2, 0, 2, 0); rl.setSpacing(7)
+        lab = QLabel("Trajectory sampling")
+        rl.addWidget(lab)
+        self.spin_traj = QDoubleSpinBox()
+        self.spin_traj.setRange(0.0, 240.0)
+        self.spin_traj.setDecimals(2)
+        self.spin_traj.setSingleStep(1.0)
+        self.spin_traj.setValue(0.0)
+        self.spin_traj.setSuffix(" Hz")
+        self.spin_traj.setFixedWidth(104)
+        self.spin_traj.setToolTip(
+            "Measure the centroid this many times a second when adding up path "
+            "length. 0 uses every frame.\n\nPath length sums step distances, and "
+            "tracker noise never cancels in that sum — it accumulates with the "
+            "number of samples, so a stationary robot still gains distance at "
+            "60 samples a second. Sampling lower cuts the noise in proportion "
+            "and leaves real displacement alone.")
+        self.spin_traj.valueChanged.connect(self._on_traj_hz)
+        rl.addWidget(self.spin_traj)
+        self.lbl_traj = QLabel("every frame"); self.lbl_traj.setObjectName("Readout")
+        rl.addWidget(self.lbl_traj, 1)
+        lay.addWidget(row)
+
+        self.traj_hz: float | None = None
 
         self.um_per_px: float | None = None
         self.has_force = False
@@ -268,6 +336,20 @@ class PlotPanel(QWidget):
         self._timer.stop()
         self._redraw()
 
+    def _on_traj_hz(self, value: float):
+        """Live-update the trajectory and its speed for a new sampling rate."""
+        self.traj_hz = float(value) if value and value > 0 else None
+        if self.traj_hz:
+            self.lbl_traj.setText(f"every {1000.0 / self.traj_hz:.0f} ms")
+        else:
+            self.lbl_traj.setText("every frame")
+        self._redraw()
+        if self._sel is not None:
+            # Re-run the region analysis so the speed readout follows the rate
+            # rather than going stale against the curve it is drawn on.
+            self.selectionAnalyzed.emit(self.analyze_selection())
+            self._draw_selection()
+
     def retheme(self):
         """Rebuild the figure under the current theme mode.
 
@@ -340,13 +422,19 @@ class PlotPanel(QWidget):
             med = np.nanmedian(length_px) if np.isfinite(length_px).any() else np.nan
             strain = length_px / med if med else np.full_like(length_px, np.nan)
 
-        if "path_length" in self._rows[0]:
+        # With a sampling rate set, the path is rebuilt from the centroids at
+        # that rate rather than taken from the pipeline's per-frame cumulative
+        # column -- that column was summed at the frame rate and its jitter is
+        # already baked in.
+        cxr = np.array([r.get("cx", np.nan) for r in self._rows], float) * k
+        cyr = np.array([r.get("cy", np.nan) for r in self._rows], float) * k
+        if self.traj_hz:
+            path = resampled_path(t, cxr, cyr, self.traj_hz)
+        elif "path_length" in self._rows[0]:
             path = np.array([r.get("path_length", np.nan) for r in self._rows], float) * (
                 1000.0 if self.um_per_px else 1.0)
         else:
-            cx = np.array([r.get("cx", np.nan) for r in self._rows], float) * k
-            cy = np.array([r.get("cy", np.nan) for r in self._rows], float) * k
-            d = np.nan_to_num(np.hypot(np.diff(cx), np.diff(cy)), nan=0.0)
+            d = np.nan_to_num(np.hypot(np.diff(cxr), np.diff(cyr)), nan=0.0)
             path = np.concatenate([[0.0], np.cumsum(d)])
 
         # Displacement along each axis, relative to the first tracked position.

@@ -70,6 +70,7 @@ class PreviewView(QLabel):
 
     poseChanged = Signal(object)        # emitted live while dragging
     poseCommitted = Signal(object)      # emitted once, on mouse release
+    roiChanged = Signal(object)         # (x, y, w, h) in image px, or None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,10 +91,24 @@ class PreviewView(QLabel):
         self._grab_offset = (0.0, 0.0)
         self._color = QColor("#FF5470")
 
+        # Region of interest, in *image* pixels. Kept in image space rather than
+        # widget space for the same reason the pose is: the widget resizes and
+        # the decode scale changes, and neither should move the region.
+        self.roi: tuple[int, int, int, int] | None = None
+        self.roi_edit = False
+        self._roi_anchor = None
+
     # ---- content ---------------------------------------------------------
 
     def set_accent(self, hex_color: str) -> None:
         self._color = QColor(hex_color)
+
+    def set_roi(self, roi, edit: bool | None = None) -> None:
+        self.roi = tuple(int(v) for v in roi) if roi else None
+        if edit is not None:
+            self.roi_edit = bool(edit)
+        self.setCursor(Qt.CrossCursor if self.roi_edit else Qt.ArrowCursor)
+        self.update()
 
     def set_frame(self, pixmap: QPixmap | None, image_size: tuple[int, int]) -> None:
         self._frame = pixmap
@@ -162,6 +177,28 @@ class PreviewView(QLabel):
         p.drawPixmap(QRectF(ox, oy, w * z, h * z), self._frame,
                      QRectF(self._frame.rect()))
 
+        # The region is drawn under the outline and over the frame: everything
+        # outside it is dimmed rather than hidden, so you can still see what you
+        # excluded and why -- a region that has clipped the robot is obvious at
+        # a glance instead of looking like a tracking failure.
+        if self.roi is not None:
+            rx, ry, rw, rh = self.roi
+            tl = self._to_widget(rx, ry)
+            br = self._to_widget(rx + rw, ry + rh)
+            rect = QRectF(tl, br)
+            shade = QColor(0, 0, 0, 110)
+            full = QRectF(ox, oy, w * z, h * z)
+            p.setPen(Qt.NoPen); p.setBrush(shade)
+            p.drawRect(QRectF(full.left(), full.top(), full.width(), rect.top() - full.top()))
+            p.drawRect(QRectF(full.left(), rect.bottom(), full.width(), full.bottom() - rect.bottom()))
+            p.drawRect(QRectF(full.left(), rect.top(), rect.left() - full.left(), rect.height()))
+            p.drawRect(QRectF(rect.right(), rect.top(), full.right() - rect.right(), rect.height()))
+            pen = QPen(self._color, 2.0, Qt.DashLine)
+            p.setPen(pen); p.setBrush(Qt.NoBrush)
+            p.drawRect(rect)
+        elif self.roi_edit and self._roi_anchor is not None:
+            pass
+
         if self.pose is None or self.template is None:
             return
 
@@ -213,6 +250,12 @@ class PreviewView(QLabel):
         return None
 
     def mousePressEvent(self, ev):
+        if self.roi_edit and ev.button() == Qt.LeftButton and self._frame is not None:
+            self._roi_anchor = self._to_image(ev.position())
+            self.roi = None
+            self.update()
+            ev.accept()
+            return
         if not self.editable or self.pose is None or ev.button() != Qt.LeftButton:
             return super().mousePressEvent(ev)
         pos = ev.position()
@@ -229,6 +272,11 @@ class PreviewView(QLabel):
 
     def mouseMoveEvent(self, ev):
         pos = ev.position()
+        if self.roi_edit and self._roi_anchor is not None:
+            self.roi = self._rect_from(self._roi_anchor, self._to_image(pos))
+            self.update()
+            ev.accept()
+            return
         if self._drag is None:
             if self.editable and self.pose is not None:
                 hit = self._hit(pos)
@@ -264,7 +312,22 @@ class PreviewView(QLabel):
         self.update()
         ev.accept()
 
+    def _rect_from(self, a, b):
+        w_img, h_img = self._image_size
+        x0, y0 = sorted((a[0], b[0])), sorted((a[1], b[1]))
+        x, X = int(max(0, x0[0])), int(min(w_img, x0[1]))
+        y, Y = int(max(0, y0[0])), int(min(h_img, y0[1]))
+        # A region smaller than this is a mis-click, not an intent.
+        if X - x < 16 or Y - y < 16:
+            return None
+        return (x, y, X - x, Y - y)
+
     def mouseReleaseEvent(self, ev):
+        if self.roi_edit and self._roi_anchor is not None:
+            self._roi_anchor = None
+            self.roiChanged.emit(self.roi)
+            ev.accept()
+            return
         if self._drag is not None:
             self._drag = None
             self.setCursor(Qt.ArrowCursor)

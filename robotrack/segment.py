@@ -34,6 +34,9 @@ class SegmentConfig:
     # specks everywhere and the lower floor let them inflate the body.
     min_area_frac: float = 5e-4     # ignore blobs below this fraction of frame
     manual_threshold: float | None = None
+    # Region of interest, in *full-resolution* image pixels, or None for the
+    # whole frame. Stored at full resolution so one region stays valid when the
+    # decode scale changes, exactly like a manual placement.
     roi: tuple[int, int, int, int] | None = None   # x, y, w, h
     gap_factor: float = 1.0         # occlusion gap tolerated, in body lengths
 
@@ -72,6 +75,48 @@ class SegmentConfig:
 # at all, which also removes the assumption that the robot moves far enough for
 # a median to see through it.
 # ---------------------------------------------------------------------------
+
+def roi_rect(cfg: "SegmentConfig", width: int, height: int,
+             scale: float = 1.0) -> tuple[int, int, int, int] | None:
+    """The configured region in *this* frame's pixels, clipped, or None."""
+    if not cfg.roi:
+        return None
+    try:
+        x, y, w, h = (int(round(v * scale)) for v in cfg.roi)
+    except (TypeError, ValueError):
+        return None
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(width, x + w), min(height, y + h)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def apply_roi(mask: np.ndarray, rect) -> np.ndarray:
+    """Zero everything outside ``rect``.
+
+    Masking rather than cropping, deliberately. A crop would be marginally
+    cheaper and would force every coordinate downstream -- the fit, the
+    centroid, the overlay, the exported CSV -- to carry an offset, which is
+    exactly the kind of bookkeeping that produces an off-by-one nobody notices
+    until the numbers are already in a figure. Zeroing keeps one coordinate
+    system for the whole pipeline.
+    """
+    if rect is None:
+        return mask
+    x, y, w, h = rect
+    out = np.zeros_like(mask)
+    out[y:y + h, x:x + w] = mask[y:y + h, x:x + w]
+    return out
+
+
+def crop_to_roi(frames, rect):
+    """Sample frames narrowed to the region, for color estimation."""
+    if rect is None:
+        return frames
+    x, y, w, h = rect
+    return [f[y:y + h, x:x + w] for f in frames]
+
 
 def chroma(frame_bgr: np.ndarray) -> np.ndarray:
     """(H,W,2) float32 of CIELAB a*, b* -- color with brightness divided out."""
@@ -133,7 +178,7 @@ def segment_color(frame_bgr: np.ndarray, cfg: SegmentConfig,
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((cfg.open_px,) * 2, np.uint8))
     if cfg.close_px > 1:
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((cfg.close_px,) * 2, np.uint8))
-    return m, thr
+    return apply_roi(m, roi_rect(cfg, m.shape[1], m.shape[0])), thr
 
 
 def build_background(reader: FrameReader, cfg: SegmentConfig,
@@ -177,6 +222,12 @@ def segment_frame(frame: torch.Tensor, background: torch.Tensor,
         m = opening(m, cfg.open_px)
     if cfg.close_px > 1:
         m = closing(m, cfg.close_px)
+    rect = roi_rect(cfg, m.shape[-1], m.shape[-2])
+    if rect is not None:
+        x, y, w, h = rect
+        keep = torch.zeros_like(m)
+        keep[..., y:y + h, x:x + w] = 1.0
+        m = m * keep
     return m, thr
 
 
@@ -313,7 +364,14 @@ def choose_color_model(reader: FrameReader, cfg: SegmentConfig,
         return ColorModel("luma", None, None, 0.0,
                            "no frames could be sampled for color"), frames
 
-    bg, tgt, sep = estimate_colors(frames)
+    # Estimate the colors from inside the region, not the whole frame. The
+    # estimator takes the densest a*b* cell as the medium and the farthest
+    # populated cell as the robot -- so a dish rim, a lamp reflection or the
+    # bench beyond the well will be chosen as "the robot" simply for being
+    # far away and numerous. Narrowing to the region is what makes the
+    # estimate describe the thing you are actually tracking.
+    rect = roi_rect(cfg, frames.shape[2], frames.shape[1]) if frames.ndim == 4 else None
+    bg, tgt, sep = estimate_colors(crop_to_roi(list(frames), rect) if rect else frames)
     if cfg.bg_chroma:
         bg = tuple(cfg.bg_chroma)
     if cfg.target_chroma:

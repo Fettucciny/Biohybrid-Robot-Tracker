@@ -102,6 +102,8 @@ DEFAULTS: dict[str, Any] = {
     # session would defeat the point of having placed it once.
     "manual_placement": False,
     "manual_pose": None,            # [tx, ty, theta, sx, sy] in full-resolution px
+    "roi": None,                    # [x, y, w, h] in full-resolution px, or None
+    "traj_hz": 0.0,                 # trajectory sampling rate; 0 = every frame
 
     # --- updates ---------------------------------------------------------
     # The public repository, so a fresh install updates itself with no setup.

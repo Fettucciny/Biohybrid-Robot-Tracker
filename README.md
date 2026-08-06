@@ -645,6 +645,44 @@ of comparable size; the robot is a few percent of the frame, so it lands high an
 slices the body in half — 62–67% of the mask in the largest fragment against
 92–93% for the fractional cut.
 
+### When the dish is brighter than the robot
+
+Some footage cannot be keyed on color at all, and it is worth knowing what that
+looks like so you stop tuning thresholds at it.
+
+On a sample frame with a magenta well, an orange robot and a saturated dish rim
+filling the frame's edges, the automatic color model chose the *rim* as the
+robot: it is the farthest populated hue from the medium and it is enormous, so
+the mask came out 219 000 px spanning the full frame width. A **region of
+interest** fixes that part — narrowed to the well, the same settings produce a
+24 000 px blob in the right place.
+
+What the region does not fix is the robot's own contrast. Measured on that frame,
+against clean sample patches:
+
+| | robot | medium | separability |
+|---|---|---|---|
+| L* | 130.1 ± 37.1 | 102.8 ± 23.2 | 0.91 |
+| a* | 168.7 ± 6.8 | 164.1 ± 3.8 | 0.85 |
+| b* | 128.0 ± 25.8 | 108.6 ± 2.3 | 1.39 |
+
+Nothing there is separable — a threshold wants a separability well above 2. Local
+contrast, Canny edge density and b\* gradient magnitude were all tested too and
+scored below 0.6. The reason is visible in the picture: only the two saturated
+orange lobes differ from the medium, while the bright ring between them sits at
+b\* 126 against a gel border at 112 and reads as the same material.
+
+There is one genuinely useful number in that table. The medium's b\* is extremely
+tight — 108.6 ± 2.3, 99th percentile 115 — so a cut at **b\* > 118 catches 49% of
+the robot and 0% of the medium**. That is a clean, contamination-free partial
+mask, which is exactly what the CAD fit wants: it needs anchors in the right
+places, not a complete silhouette.
+
+So for footage like this the working recipe is a region of interest, a manual
+placement to seed the pose, and letting the template fit carry the shape. And
+the real fix is upstream: even illumination, and a medium that is not blown out
+at the frame edges, restore the separation that makes all of this automatic.
+
 ### Fragment grouping needs an envelope
 
 Regrouping fragments across an occlusion gap by proximity alone was tuned for a
@@ -1094,8 +1132,10 @@ hurting you.
 
 ### Visual identity
 
-Built on the shared **MEA Suite theme kit**, which is vendored unmodified as
-`robotrack/mea_theme.py`. The suite's rule is that neutrals, the indigo→teal
+The palette is adapted from a theme kit vendored unmodified as
+`robotrack/mea_theme.py` — the file keeps its original name because it is
+third-party code, but this project is not part of that suite and does not claim
+to be. The kit's rule is that neutrals, the indigo→teal
 window gradient, radii (card 12 px · button 8 px · field 6 px), typography and
 the parula colormap stay identical across programs, and **only the accent
 changes**. BioHybrid RoboTracker follows that, so it reads as a member of the family.
@@ -1116,7 +1156,7 @@ contraction, not spikes.
 One caution that comes with a red accent: red reads as "danger" in most
 interfaces, and the primary button is filled with it. Warnings and errors
 therefore use amber and emerald, **never a second red**, so the accent never has
-to compete with an alarm. Exported figures use the suite's plot styling and draw
+to compete with an alarm. Exported figures use the kit's plot styling and draw
 from the shared parula map, so panels look like they came from the same
 instrument.
 
@@ -1178,7 +1218,7 @@ robotrack/
   forcelut.py    Length,Force calibration curve -> force per frame
   forcemodel.py  Cvetkovic beam model: delta length -> force, in closed form
   theme.py       widget styling, the self-explaining help popups
-  mea_theme.py   the MEA Suite palette and type scale
+  mea_theme.py   vendored palette and type scale (third-party)
   paramhelp.py   the text behind every control's help button
 launcher/
   app.py         frozen entry point, crash dialogs, --selftest

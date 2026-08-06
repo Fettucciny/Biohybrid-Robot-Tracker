@@ -40,6 +40,8 @@ def main(argv=None) -> int:
                    help="list the candidate outlines in --dxf and exit")
     p.add_argument("-o", "--outdir", default="results")
     p.add_argument("--px-per-mm", type=float, default=None)
+    p.add_argument("--roi", metavar="X,Y,W,H",
+                   help="track only inside this rectangle, in full-resolution px")
     p.add_argument("--scale", type=float, default=1.0, help="decode downscale, e.g. 0.5")
     p.add_argument("--smooth-ms", type=float, default=100.0)
     p.add_argument("--tau-px", type=float, default=12.0, help="robust kernel scale")
@@ -66,6 +68,13 @@ def main(argv=None) -> int:
                     beam=(_beam(a) if a.force_beam else None),
                     outdir=a.outdir, px_per_mm=a.px_per_mm,
                     scale=a.scale, write_overlay=not a.no_overlay, gpu=not a.cpu)
+    if a.roi:
+        try:
+            x, y, w, h = (int(v) for v in a.roi.replace(" ", "").split(","))
+            cfg.segment.roi = (x, y, w, h)
+        except ValueError:
+            print("--roi wants four integers: X,Y,W,H", file=sys.stderr)
+            return 2
     cfg.analysis.smooth_ms = a.smooth_ms
     cfg.fit.tau_px = a.tau_px
     cfg.fit.n_restarts = a.restarts

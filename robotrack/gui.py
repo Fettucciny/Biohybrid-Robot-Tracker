@@ -530,6 +530,7 @@ class MainWindow(QMainWindow):
         # Manual placement, stored in *full-resolution* image pixels so it
         # survives a change of decode scale.
         self.manual_pose: list[float] | None = self.state.get("manual_pose")
+        self.roi: list[int] | None = self.state.get("roi") or None
         self._last_fit_pose: list[float] | None = None
 
         # Dragging a slider fires many changes and each preview costs a decode
@@ -578,6 +579,12 @@ class MainWindow(QMainWindow):
                     continue          # the scrubber is meant to take the wheel
                 wdg.installEventFilter(self._nowheel)
                 wdg.setFocusPolicy(Qt.StrongFocus)
+
+        try:
+            self.plots.spin_traj.setValue(float(self.state.get("traj_hz") or 0.0))
+        except Exception:
+            pass
+        self.plots.spin_traj.valueChanged.connect(self._touch)
 
         self._set_enabled(False)
         dev = get_device(True)
@@ -950,6 +957,33 @@ class MainWindow(QMainWindow):
         self.lbl_pose = QLabel("—"); self.lbl_pose.setObjectName("Readout")
         self.lbl_pose.setWordWrap(True)
         c.add_widget(self.lbl_pose)
+
+        # ---- region of interest ------------------------------------------
+        rule = QFrame(); rule.setObjectName("cardRule"); rule.setFixedHeight(1)
+        c.add_widget(rule)
+
+        self.chk_roi = QCheckBox("Draw a region of interest")
+        self.chk_roi.stateChanged.connect(self._on_roi_toggle)
+        rowr = QWidget(); rr = QHBoxLayout(rowr); rr.setContentsMargins(0, 0, 0, 0); rr.setSpacing(7)
+        rr.addWidget(self.chk_roi); rr.addWidget(HelpBadge(HELP["roi"]))
+        rr.addStretch(1)
+        c.add_widget(rowr)
+
+        self.lbl_roi = QLabel("Whole frame.")
+        self.lbl_roi.setObjectName("Hint"); self.lbl_roi.setWordWrap(True)
+        c.add_widget(self.lbl_roi)
+
+        self.chk_appearance = QCheckBox("Lock onto appearance instead of color")
+        rowa2 = QWidget(); ra2 = QHBoxLayout(rowa2)
+        ra2.setContentsMargins(0, 0, 0, 0); ra2.setSpacing(7)
+        ra2.addWidget(self.chk_appearance); ra2.addWidget(HelpBadge(HELP["appearance"]))
+        ra2.addStretch(1)
+        c.add_widget(rowa2)
+
+        self.btn_roi_clear = QPushButton("Clear region")
+        self.btn_roi_clear.setObjectName("Ghost")
+        self.btn_roi_clear.clicked.connect(self._clear_roi)
+        c.add_widget(self.btn_roi_clear)
         v.addWidget(c)
 
         # -------------------------------------------------- analysis
@@ -1441,6 +1475,7 @@ class MainWindow(QMainWindow):
         self.view.set_accent(ACCENT)
         self.view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.view.setMinimumSize(440, 320)
+        self.view.roiChanged.connect(self._on_roi_drawn)
         self.view.poseChanged.connect(self._on_pose_dragged)
         self.view.poseCommitted.connect(self._on_pose_committed)
         v.addWidget(self.view, 1)
@@ -1492,6 +1527,7 @@ class MainWindow(QMainWindow):
             gap_factor=self.spin_gap.value(),
             manual_threshold=None if self.cmb_thr.currentIndex() == 0
             else float(self.spin_thr.value()),
+            roi=tuple(self.roi) if self.roi else None,
         )
 
     def _fit_cfg(self) -> FitConfig:
@@ -1585,6 +1621,8 @@ class MainWindow(QMainWindow):
         st["video_path"] = self.video or ""
         st["dxf_path"] = self.dxf or ""
         st["output_dir"] = self.outdir or ""
+        st["roi"] = list(self.roi) if self.roi else None
+        st["traj_hz"] = float(self.plots.spin_traj.value())
         st["manual_pose"] = list(self.manual_pose) if self.manual_pose else None
         st["force_lut_path"] = self.lut_path or ""
         try:
@@ -2211,6 +2249,70 @@ class MainWindow(QMainWindow):
             dlg.check()
         dlg.exec()
 
+    def _current_time(self) -> float:
+        info = self.info
+        if info is None:
+            return 0.0
+        i = int(self.slider.value())
+        ts = getattr(info, "timestamps", None)
+        if ts is not None and getattr(ts, "size", 0) > i:
+            return float(ts[i] - ts[0])
+        return i / max(getattr(info, "measured_fps", 30.0), 1e-6)
+
+    def _last_pose_obj(self):
+        """The preview fit on the current frame, as a Pose, or None.
+
+        Supplying it is what turns the appearance lock from a relative
+        measurement into an absolute one -- without it the tracker knows how
+        much the robot changed but not how big it is, and the run refuses to
+        calibrate rather than inventing a scale.
+        """
+        p = getattr(self, "_last_fit_pose", None)
+        if not p or self.template is None:
+            return None
+        try:
+            from .register import Pose
+            return Pose(float(p[0]), float(p[1]), float(p[2]),
+                        float(p[3]), float(p[4]), cost=0.0, confidence=1.0)
+        except Exception:
+            return None
+
+    # ---- region of interest ----------------------------------------------
+
+    def _on_roi_toggle(self, *_):
+        on = self.chk_roi.isChecked()
+        self.view.set_roi(self.roi, edit=on)
+        if on:
+            self._log("drag on the video to draw the region to track inside.")
+        self._sync_roi_label()
+
+    def _on_roi_drawn(self, roi):
+        self.roi = list(roi) if roi else None
+        self._sync_roi_label()
+        self._touch()
+        self._render_preview()
+
+    def _clear_roi(self):
+        self.roi = None
+        self.chk_roi.setChecked(False)
+        self.view.set_roi(None, edit=False)
+        self._sync_roi_label()
+        self._touch()
+        self._render_preview()
+
+    def _sync_roi_label(self):
+        if not self.roi:
+            self.lbl_roi.setText(
+                "Whole frame. Draw a region when something outside the dish is "
+                "brighter or more saturated than the robot — the color model is "
+                "estimated inside the region, not just clipped to it.")
+            return
+        x, y, w, h = self.roi
+        frac = ""
+        if self.info is not None and self.info.width and self.info.height:
+            frac = f" — {100.0 * w * h / (self.info.width * self.info.height):.0f}% of the frame"
+        self.lbl_roi.setText(f"Tracking inside {w} × {h} px at ({x}, {y}){frac}.")
+
     # ---- appearance ------------------------------------------------------
 
     def _sync_theme_button(self):
@@ -2700,6 +2802,12 @@ class MainWindow(QMainWindow):
             # figure will show, and it is recorded in run_info.json so the
             # figure and the numbers cannot disagree about their range.
             axis_ranges=self.plots.axis_ranges(),
+            # The appearance lock learns from the frame you are looking at, the
+            # region you drew, and whatever pose is currently fitted there --
+            # which is why it is worth scrubbing to a clean frame first.
+            appearance=((self._current_time(), tuple(self.roi),
+                         self._last_pose_obj())
+                        if (self.chk_appearance.isChecked() and self.roi) else None),
             known_width_mm=(self.spin_width.value() or None),
             # Roughly six updates a second at 36 fps: enough to watch tracking
             # hold, cheap enough not to slow the run.

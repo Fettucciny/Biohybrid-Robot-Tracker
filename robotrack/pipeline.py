@@ -112,6 +112,12 @@ class RunConfig:
     # *full-resolution* image pixels. Kept at full resolution so one placement
     # stays valid when the decode scale changes.
     manual_pose: list[float] | None = None
+    # Appearance lock. When set, the pose comes from aligning a reference patch
+    # rather than from fitting the drawing to a color mask -- the path to take
+    # on footage where the robot and the medium are not separable per pixel.
+    # (reference frame index, rect) with the rect in full-resolution pixels.
+    appearance: object = None
+
     segment: SegmentConfig = field(default_factory=SegmentConfig)
     fit: FitConfig = field(default_factory=FitConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
@@ -333,6 +339,21 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     # Where the time actually goes. A run that takes twenty seconds one day and
     # ten minutes the next is almost always one stage, not a general slowdown,
     # and without this the only way to find out is to guess.
+    # The appearance lock needs one frame to learn from. It is taken before the
+    # run rather than from inside the loop so a failure to build it is reported
+    # immediately instead of after a minute of decoding.
+    tracker = None
+    if cfg.appearance:
+        from .appearance import AppearanceConfig, AppearanceTracker
+        ref_t, ref_rect = cfg.appearance[0], cfg.appearance[1]
+        ref_pose = cfg.appearance[2] if len(cfg.appearance) > 2 else None
+        ref_reader = FrameReader(info, backend, scale=cfg.scale, color=True)
+        ref_frame = ref_reader.read_at(float(ref_t))
+        if ref_frame is None:
+            raise RuntimeError(f"could not decode the reference frame at {ref_t:.2f} s")
+        rect = tuple(int(round(v * cfg.scale)) for v in ref_rect)
+        tracker = AppearanceTracker(ref_frame, rect, ref_pose, AppearanceConfig())
+
     t_seg = t_fit = t_draw = 0.0
     t_mark = time.time()
     for m in seg:
@@ -340,7 +361,28 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
             raise RunAborted(f"stopped after {len(rows)} frames")
         t_seg += time.time() - t_mark
         rec = {"frame": m.index, "t": m.t, "area_px": m.area_px}
-        if fitter is not None:
+        if tracker is not None:
+            t0 = time.time()
+            pose = tracker.track(m.frame) if m.frame is not None else None
+            t_fit += time.time() - t0
+            if pose is None:
+                rec.update(cx=np.nan, cy=np.nan, width_px=np.nan, length_px=np.nan,
+                           theta=np.nan, confidence=float(tracker.last_cc),
+                           fit_cost=np.nan)
+            else:
+                # Scales are relative to the reference frame. With a drawing the
+                # tracker has already composed them onto its pose, so width and
+                # length come out in the same units as the color path; without
+                # one they are ratios, and the strain is still right.
+                wmm = tpl.width_mm if tpl is not None else 1.0
+                lmm = tpl.length_mm if tpl is not None else 1.0
+                rec.update(cx=pose.tx, cy=pose.ty,
+                           width_px=pose.sx * wmm, length_px=pose.sy * lmm,
+                           theta=pose.theta, confidence=pose.confidence,
+                           fit_cost=pose.cost, scale_x=pose.sx, scale_y=pose.sy)
+                if cfg.write_overlay and fitter is not None:
+                    outlines[m.index] = fitter.outline(pose)
+        elif fitter is not None:
             t0 = time.time()
             pose = fitter.fit(m.mask, signal=_fit_signal(m, seg))
             t_fit += time.time() - t0
@@ -412,12 +454,24 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     # The assumption is checkable, so it is checked: the width's coefficient of
     # variation is computed and reported. If the width is in fact moving, that
     # number says so instead of quietly biasing every micrometer in the output.
+    # An appearance lock with no reference pose reports *ratios*, not pixels --
+    # it knows how much the robot changed, not how big it is. Calibrating a
+    # width ruler off a ratio produces a scale that looks plausible and is
+    # meaningless, so that path is refused rather than fudged: strain, frequency
+    # and the trajectory are all still correct, and only absolute size is
+    # withheld. Give the tracker a reference pose (a hand placement, or a good
+    # fit on the reference frame) and the scales come back in real pixels.
+    appearance_relative = bool(cfg.appearance) and (
+        len(cfg.appearance) < 3 or cfg.appearance[2] is None)
+
     px_per_mm, src = cfg.px_per_mm, "user-supplied"
     width_cv = float("nan")
     width_med_px = float("nan")
     ok = t.confidence >= cfg.analysis.min_confidence
     true_width_mm = cfg.known_width_mm if cfg.known_width_mm else (
         tpl.width_mm if tpl is not None else None)
+    if appearance_relative:
+        true_width_mm = None
     if true_width_mm and ok.any():
         w = t.loc[ok, "width_px"].to_numpy()
         width_med_px = float(np.nanmedian(w))
@@ -533,6 +587,9 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
                              "iters_warm": cfg.fit.iters_warm,
                              "early_stop": cfg.fit.early_stop,
                              "features": bool(tpl and tpl.n_features)},
+            "roi": list(cfg.segment.roi) if cfg.segment.roi else None,
+            "tracking": "appearance" if cfg.appearance else
+                        ("cad-fit" if tpl is not None else "markerless"),
             "decode_scale": cfg.scale}
     (out / "run_info.json").write_text(
         json.dumps(_json_safe(meta), indent=2, default=str, allow_nan=False))

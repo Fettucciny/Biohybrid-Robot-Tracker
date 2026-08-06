@@ -53,13 +53,16 @@ import hashlib
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass, asdict
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 MANIFEST_NAME = "robotrack-updates.json"
@@ -201,13 +204,53 @@ class UpdateError(RuntimeError):
     pass
 
 
+@lru_cache(maxsize=1)
+def _ssl_context():
+    """An SSL context that can actually verify a certificate in a frozen app.
+
+    Python does not carry a CA bundle of its own. On a normal install it borrows
+    the operating system's, which works everywhere -- and stops working inside a
+    PyInstaller bundle on macOS, where there is no Python installation for the
+    usual ``Install Certificates.command`` to have run against and the OpenSSL
+    that ships in the bundle has no store to point at. Every HTTPS request then
+    fails with CERTIFICATE_VERIFY_FAILED, which is why "Check for updates" on a
+    Mac returned an error instead of a version.
+
+    certifi carries Mozilla's bundle as a data file, so it travels inside the
+    app. If it is unavailable the default context is used, which is correct on
+    Windows and on a source install.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        try:
+            return ssl.create_default_context()
+        except Exception:
+            return None
+
+
 def _read_bytes(location: str, timeout: int = NETWORK_TIMEOUT) -> bytes:
     """Fetch a manifest or payload from a URL or a filesystem path."""
     if _is_url(location):
         req = Request(location, headers={"User-Agent": USER_AGENT,
                                          "Accept": "application/json, */*"})
-        with urlopen(req, timeout=timeout) as r:     # noqa: S310 - scheme checked below
-            return r.read()
+        ctx = _ssl_context()
+        kwargs = {"timeout": timeout}
+        if ctx is not None and str(location).lower().startswith("https"):
+            kwargs["context"] = ctx
+        try:
+            with urlopen(req, **kwargs) as r:        # noqa: S310 - scheme checked below
+                return r.read()
+        except URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if "CERTIFICATE_VERIFY_FAILED" in str(reason):
+                raise UpdateError(
+                    "Could not verify the server's certificate.\n\n"
+                    "This build is missing its certificate bundle. Reinstall "
+                    "from the latest installer, or point the update channel at "
+                    "a folder instead of an https address.") from exc
+            raise
     return Path(location).read_bytes()
 
 
