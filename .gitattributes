@@ -1,0 +1,54 @@
+# Line endings, decided here rather than by whoever happens to clone the repo.
+#
+# Git for Windows installs with core.autocrlf=true, which converts CRLF to LF on
+# commit and back to CRLF on checkout. That is usually invisible and harmless --
+# it is the source of the "LF will be replaced by CRLF" warnings -- but it leaves
+# the outcome depending on each person's local git configuration, and one file
+# type here genuinely cannot tolerate CRLF.
+#
+# A shell script with CRLF endings does not run. On macOS, bash reads the
+# carriage return as part of the last token on every line, so a here-document
+# terminator becomes "PY\r", never matches, and the script dies with an
+# "unexpected EOF" error pointing at the wrong line entirely. That failure has
+# already cost this project one 30-minute CI round trip, and the whole point of
+# recording it here is that the next person cannot reintroduce it by having a
+# different git setting.
+#
+# The `text` attribute means "normalise to LF in the repository". `eol=` then
+# pins what lands in the working copy.
+
+# Let git decide for anything not named below.
+* text=auto
+
+# Must be LF everywhere, or they will not execute on macOS or Linux.
+*.sh        text eol=lf
+
+# Native tooling that expects Windows endings. PowerShell copes with LF, but
+# these are Windows-only files and there is no reason to fight the platform.
+*.ps1       text eol=crlf
+*.iss       text eol=crlf
+
+# Source, config and docs: LF in the repo, and LF on disk too, so a file edited
+# on Windows and read on the Mac runner is byte-identical.
+*.py        text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+*.json      text eol=lf
+.gitignore  text eol=lf
+
+# Binary: never touch these. Git's heuristics usually get it right, but a DXF is
+# plain text with CRLF that some CAD tools are strict about, and a corrupted
+# icon or sound is a silent failure rather than a loud one.
+*.png       binary
+*.ico       binary
+*.icns      binary
+*.wav       binary
+*.zip       binary
+*.dmg       binary
+*.exe       binary
+*.mov       binary
+*.mp4       binary
+*.dxf       -text
+*.DXF       -text
