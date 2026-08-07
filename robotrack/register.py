@@ -54,6 +54,12 @@ class FitConfig:
     tau_final_px: float = 2.5   # kernel scale at convergence, sets final precision
     inlier_px: float = 4.0      # a template point closer than this counts as matched
     n_restarts: int = 64
+    # Restarts once the tracker is locked on. The multi-start search exists to
+    # find the robot from a cold seed; on a warm frame every hypothesis begins a
+    # fraction of a pixel from the answer, and most of them are re-deriving what
+    # the first one already has. A cold frame -- the first one, and any recovery
+    # after a lost stretch -- still gets the full count.
+    n_restarts_warm: int = 12
     iters: int = 150
     iters_warm: int = 60        # cheaper schedule once tracking is locked on
     lr: float = 0.05
@@ -93,6 +99,53 @@ class FitConfig:
     # each happens to carry. At 1.0 the outer boundary and the interior each
     # contribute half.
     feature_weight: float = 1.0
+
+    # --- anisotropy: width is a constant, length is the measurement ---------
+    #
+    # These two axes are not the same kind of quantity and constraining them
+    # alike is a modelling error. The robot's width is a property of the mould:
+    # it is what the drawing says it is, it does not participate in
+    # contraction, and any frame where the fitted width departs from the
+    # drawing is a frame where segmentation went wrong -- not a frame where the
+    # robot got wider. Its length is the opposite: it is the thing being
+    # measured, it shortens and relaxes continuously, and pinning it would
+    # destroy the signal.
+    #
+    # So width is held near nominal by a quadratic, and length is left free
+    # downward and capped upward. The cap is the useful half: relaxed length is
+    # bounded above by the drawing, so an outline that has stretched past it has
+    # certainly latched onto something that is not the robot, and that failure
+    # is otherwise invisible -- a too-long fit still puts most of its points on
+    # real edges and still reports high confidence.
+    #
+    # ``width_weight`` is in units of the chamfer loss, which saturates at 1, so
+    # a value of 2 means "one sigma of width error costs twice a completely
+    # wrong outline". That is meant to be dominant.
+    width_weight: float = 2.0
+    width_tol: float = 0.04          # sigma of the width hold, fraction of nominal
+    width_max_change: float = 0.15   # hard clamp on sx, fraction of nominal
+    # Noise allowance on the length ceiling, in pixels of the fitted outline.
+    # Not zero: the edge of a real mask moves by a pixel or so frame to frame,
+    # and a hard equality would clip genuine relaxation to whichever frame
+    # happened to segment tightest.
+    length_overshoot_px: float = 3.0
+    # Frames used to learn the reference length before the ceiling is enforced.
+    # Skipped entirely when the outline was placed by hand, since the placement
+    # already states what the drawing's size is on this footage.
+    length_ref_frames: int = 45
+    length_ref_quantile: float = 0.90
+
+    # --- work window -------------------------------------------------------
+    # Building the distance field, the soft mask and the interior edge map are
+    # whole-frame OpenCV operations, and at 1080p they cost more than the
+    # optimizer they feed. None of them is needed more than a body length away
+    # from where the robot was on the previous frame. Restricted to that window
+    # they are roughly ten times cheaper, and the result inside the window is
+    # identical. Only applied on warm frames -- a cold seed genuinely may be
+    # anywhere in the picture.
+    use_window: bool = True
+    window_margin_px: float = 48.0
+    window_margin_frac: float = 0.35   # of the body's own extent
 
 
 @dataclass
@@ -168,10 +221,19 @@ def distance_field(mask: np.ndarray, dev: Device,
     return torch.from_numpy(d).to(dev.torch_device)[None, None]
 
 
-def _sample(D: torch.Tensor, pts: torch.Tensor) -> torch.Tensor:
-    """Bilinearly sample D at (K,M,2) pixel coordinates -> (K,M) distances."""
+def _sample(D: torch.Tensor, pts: torch.Tensor,
+            origin: torch.Tensor | None = None) -> torch.Tensor:
+    """Bilinearly sample D at (K,M,2) pixel coordinates -> (K,M) distances.
+
+    ``origin`` is where D's top-left corner sits in the full frame, for when D
+    covers only a window around the robot. Subtracting it here rather than
+    offsetting the poses keeps every pose in the image's own coordinates, which
+    is what everything downstream -- the CSV, the overlay, the plots -- expects.
+    """
     K, M, _ = pts.shape
     H, W = D.shape[-2:]
+    if origin is not None:
+        pts = pts - origin
     gx = 2.0 * pts[..., 0] / (W - 1) - 1.0
     gy = 2.0 * pts[..., 1] / (H - 1) - 1.0
     grid = torch.stack([gx, gy], dim=-1).view(K, M, 1, 2)
@@ -272,12 +334,85 @@ class ShapeFitter:
         self.prev: np.ndarray | None = None
         self._base_scale: float | None = None
         self._rng = np.random.default_rng(1)
+        # Reference scales for the anisotropy terms, and the samples they are
+        # learned from. A hand placement states both outright. Otherwise they
+        # are measured over the first few dozen confident fits, which run
+        # unconstrained -- the reference has to come from the footage, not from
+        # frame zero's automatic seed. That seed is one moment estimate on one
+        # mask and carries whatever bias the morphology gave it; anchoring the
+        # width to it locked that bias in for the whole clip and moved the
+        # derived calibration by a percent.
+        self._len_ref: float | None = None
+        self._wid_ref: float | None = None
+        self._ref_samples: list[tuple[float, float]] = []
         if self.seed_pose is not None:
             # Anchor the scale limits to the hand-placed size. Deriving them from
             # the first automatic seed instead would bound the search around
             # whatever the mask happened to look like on frame zero -- which,
             # under occlusion, is the one frame you least want to trust.
             self._base_scale = (float(self.seed_pose[3]), float(self.seed_pose[4]))
+            self._wid_ref = float(self.seed_pose[3])
+            self._len_ref = float(self.seed_pose[4])
+
+    # ---- window ----------------------------------------------------------
+
+    def _window(self, shape: tuple[int, int]) -> tuple[int, int, int, int] | None:
+        """Box around the previous pose to do the per-frame image work in.
+
+        None means "the whole frame", which is what a cold or recovering frame
+        gets: with no previous pose there is no reason to believe the robot is
+        anywhere in particular, and guessing wrong would be a lost track rather
+        than a slow one.
+        """
+        if not self.cfg.use_window or self.prev is None:
+            return None
+        h, w = shape
+        tx, ty, th, sx, sy = (float(v) for v in self.prev)
+        pts = self.tpl.points
+        x = pts[:, 0] * sx
+        y = pts[:, 1] * sy
+        c, s = np.cos(th), np.sin(th)
+        X = c * x - s * y + tx
+        Y = s * x + c * y + ty
+        extent = max(float(np.ptp(X)), float(np.ptp(Y)), 1.0)
+        m = max(self.cfg.window_margin_px, self.cfg.window_margin_frac * extent)
+        x0 = max(0, int(np.floor(X.min() - m)))
+        y0 = max(0, int(np.floor(Y.min() - m)))
+        x1 = min(w, int(np.ceil(X.max() + m)))
+        y1 = min(h, int(np.ceil(Y.max() + m)))
+        if x1 - x0 < 32 or y1 - y0 < 32:
+            return None
+        # Nothing gained if the window is most of the frame anyway, and a full
+        # frame keeps the distance field exact at its borders.
+        if (x1 - x0) * (y1 - y0) > 0.55 * w * h:
+            return None
+        return x0, y0, x1, y1
+
+    def _length_ceiling(self, by: float) -> float:
+        """Upper bound on the length scale, in template units.
+
+        During the learning window this is the loose global limit; afterwards it
+        is the learned relaxed length plus the pixel noise allowance.
+        """
+        cfg = self.cfg
+        if self._len_ref is None:
+            return by * (1 + cfg.max_scale_change)
+        return self._len_ref + cfg.length_overshoot_px / max(self.tpl.length_mm, 1e-6)
+
+    def _note_scales(self, sx: float, sy: float, conf: float) -> None:
+        """Accumulate the learning window, and close it once it is full."""
+        if self._len_ref is not None or conf < self.cfg.recovery_conf:
+            return
+        self._ref_samples.append((float(sx), float(sy)))
+        if len(self._ref_samples) < self.cfg.length_ref_frames:
+            return
+        arr = np.asarray(self._ref_samples, float)
+        # Median for the width, because it is one number the whole clip shares
+        # and the median is the robust estimate of it. High quantile for the
+        # length, because the quantity wanted is not the typical length but the
+        # relaxed one -- the ceiling, not the centre.
+        self._wid_ref = float(np.median(arr[:, 0]))
+        self._len_ref = float(np.quantile(arr[:, 1], self.cfg.length_ref_quantile))
 
     def _coverage(self, obs: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
         """Penalise observed robot pixels lying outside the fitted outline.
@@ -304,9 +439,14 @@ class ShapeFitter:
         tau2 = self.cfg.coverage_tau_mm ** 2
         return (outside * outside / (outside * outside + tau2)).mean(dim=1)
 
-    def _candidates(self, mask: np.ndarray) -> torch.Tensor:
+    def _candidates(self, mask: np.ndarray, k: int | None = None,
+                    origin: tuple[int, int] = (0, 0)) -> torch.Tensor:
+        """``mask`` may be a window; ``origin`` is where its corner sits."""
         cfg = self.cfg
+        k = int(k or cfg.n_restarts)
         seed = np.array(seed_from_mask(mask, self.tpl), np.float32)
+        seed[0] += origin[0]
+        seed[1] += origin[1]
         cands = [seed]
         if cfg.allow_flip:
             f = seed.copy(); f[2] += np.pi; cands.append(f)
@@ -320,8 +460,8 @@ class ShapeFitter:
             cands.insert(1, self.prev.copy())   # duplicated: gets its own jitter below
 
         base = np.stack(cands)
-        reps = int(np.ceil(cfg.n_restarts / len(base)))
-        out = np.repeat(base, reps, axis=0)[: cfg.n_restarts].copy()
+        reps = int(np.ceil(k / len(base)))
+        out = np.repeat(base, reps, axis=0)[:k].copy()
         # Jitter every restart except the first, so one hypothesis is always the
         # clean warm start from the previous frame.
         rng = np.random.default_rng(0)
@@ -337,23 +477,49 @@ class ShapeFitter:
         if mask.sum() < 10:
             return None
         cfg = self.cfg
+        warm = self.prev is not None
+
+        # Everything below the window line is done on a crop around where the
+        # robot was, not on the frame. The poses stay in image coordinates --
+        # only the field lookups are offset -- so nothing downstream can tell.
+        win = self._window(mask.shape[:2])
+        if win is None:
+            sub, sub_signal, off = mask, signal, None
+            ox = oy = 0
+        else:
+            x0, y0, x1, y1 = win
+            ox, oy = x0, y0
+            sub = np.ascontiguousarray(mask[y0:y1, x0:x1])
+            sub_signal = (None if signal is None
+                          else np.ascontiguousarray(signal[y0:y1, x0:x1]))
+            off = torch.tensor([float(x0), float(y0)],
+                               device=self.dev.torch_device)
+            if sub.sum() < 10:
+                # The robot left the window -- an abrupt jump, or a lost track.
+                # Fall back to the whole frame rather than reporting nothing.
+                sub, sub_signal, off = mask, signal, None
+                ox = oy = 0
+
         # Two fields on purpose. The silhouette matches mask edges only -- adding
         # interior edges there would let the outer boundary settle onto an
         # internal one. The features match both.
-        D = distance_field(mask, self.dev)
+        D = distance_field(sub, self.dev)
         Dfeat = D
-        if self.feat is not None and signal is not None and cfg.feature_weight > 0:
-            Dfeat = distance_field(mask, self.dev,
-                                   extra_edges=interior_edges(signal, mask))
-        S = soft_mask(mask, self.dev)
-        p = self._candidates(mask).requires_grad_(True)
+        if self.feat is not None and sub_signal is not None and cfg.feature_weight > 0:
+            Dfeat = distance_field(sub, self.dev,
+                                   extra_edges=interior_edges(sub_signal, sub))
+        S = soft_mask(sub, self.dev)
+        n_k = cfg.n_restarts_warm if warm else cfg.n_restarts
+        p = self._candidates(sub, min(max(int(n_k), 1), cfg.n_restarts),
+                             origin=(ox, oy)).requires_grad_(True)
 
         # Subsample the observed robot pixels for the coverage term.
-        ys, xs = np.nonzero(mask)
+        ys, xs = np.nonzero(sub)
         if xs.size > cfg.coverage_points:
             sel = self._rng.choice(xs.size, cfg.coverage_points, replace=False)
             xs, ys = xs[sel], ys[sel]
-        obs = torch.from_numpy(np.stack([xs, ys], 1).astype(np.float32)).to(self.dev.torch_device)
+        obs = torch.from_numpy(np.stack([xs + ox, ys + oy], 1).astype(np.float32)
+                               ).to(self.dev.torch_device)
         opt = torch.optim.Adam([p], lr=cfg.lr)
 
         # Scales live in log space during optimization so they cannot go
@@ -362,8 +528,20 @@ class ShapeFitter:
         if self._base_scale is None:
             self._base_scale = (float(p[0, 3].item()), float(p[0, 4].item()))
         bx, by = self._base_scale
+        # Until the references are learned the fit runs as it always did: the
+        # loose symmetric limits and no width penalty. That learning window is
+        # what the references are measured from, so constraining it would be
+        # circular.
+        wref = self._wid_ref
+        w_weight = cfg.width_weight if wref is not None else 0.0
+        if wref is None:
+            sx_lo, sx_hi = bx * s_lo, bx * s_hi
+        else:
+            w_lim = min(cfg.width_max_change, cfg.max_scale_change)
+            sx_lo, sx_hi = wref * (1 - w_lim), wref * (1 + w_lim)
+        sy_hi = self._length_ceiling(by)
+        sy_lo = by * s_lo
 
-        warm = self.prev is not None
         n_iter = cfg.iters_warm if warm else cfg.iters
         prior = None
         sigma = max(cfg.scale_prior_rate_per_s * self.dt, 1e-3)
@@ -383,7 +561,7 @@ class ShapeFitter:
             opt.zero_grad(set_to_none=True)
             tau2 = float(taus[it]) ** 2
             q = _transform(self.pts, p)
-            d = _sample(D, q)
+            d = _sample(D, q, off)
             rho = (d * d) / (d * d + tau2)          # bounded, saturates at 1
             loss = rho.mean(dim=1)
 
@@ -394,7 +572,7 @@ class ShapeFitter:
                 # little wrong has nothing to correct it. Interior edges make the
                 # fit over-determined, which is what lets the threshold be tight.
                 qf = _transform(self.feat, p)
-                df = _sample(Dfeat, qf)
+                df = _sample(Dfeat, qf, off)
                 rf = ((df * df) / (df * df + tau2)).mean(dim=1)
                 loss = (loss + cfg.feature_weight * rf) / (1.0 + cfg.feature_weight)
 
@@ -409,8 +587,16 @@ class ShapeFitter:
             # "correctly fitted" from "shrunk onto a subset of the edges" --
             # both put template points on real edges. This term can.
             out = q + cfg.contain_offset_px * _rotate(self.nrm, p[:, 2])
-            loss = loss + cfg.contain_weight * _sample(S, out).mean(dim=1)
+            loss = loss + cfg.contain_weight * _sample(S, out, off).mean(dim=1)
             loss = loss + cfg.coverage_weight * self._coverage(obs, p)
+
+            # Width held to the drawing. Quadratic rather than bounded on
+            # purpose: this is not a robust term shrugging off outliers, it is a
+            # statement that a wrong width is always wrong, and the further out
+            # the fit goes the harder it should be pulled back.
+            if w_weight > 0:
+                wrel = (p[:, 3] - wref) / max(wref * cfg.width_tol, 1e-6)
+                loss = loss + w_weight * wrel.pow(2)
 
             if prior is not None:
                 rel = (p[:, 3:5] - prior) / prior.clamp_min(1e-6)
@@ -418,8 +604,9 @@ class ShapeFitter:
             loss.sum().backward()
             opt.step()
             with torch.no_grad():
-                p[:, 3].clamp_(bx * s_lo, bx * s_hi)
-                p[:, 4].clamp_(by * s_lo, by * s_hi)
+                p[:, 3].clamp_(sx_lo, sx_hi)
+                # Length is free to shrink and capped above; see FitConfig.
+                p[:, 4].clamp_(sy_lo, sy_hi)
 
             # Checked only every Nth iteration: reading the loss forces a
             # GPU->CPU sync, and doing that every step would cost more than the
@@ -437,7 +624,7 @@ class ShapeFitter:
                         for _ in range(2):
                             opt.zero_grad(set_to_none=True)
                             q = _transform(self.pts, p)
-                            d = _sample(D, q)
+                            d = _sample(D, q, off)
                             l2 = ((d * d) / (d * d + taus_tail ** 2)).mean(dim=1)
                             l2.sum().backward()
                             opt.step()
@@ -448,18 +635,18 @@ class ShapeFitter:
 
         with torch.no_grad():
             q = _transform(self.pts, p)
-            d = _sample(D, q)
+            d = _sample(D, q, off)
             # Selection and the reported cost use the *final* kernel and no prior,
             # so the number written to the CSV measures agreement with the image
             # alone and is comparable across frames.
             tau2 = cfg.tau_final_px ** 2
             out = q + cfg.contain_offset_px * _rotate(self.nrm, p[:, 2])
-            contain = _sample(S, out).mean(dim=1)
+            contain = _sample(S, out, off).mean(dim=1)
             cover = self._coverage(obs, p)
             edge = ((d * d) / (d * d + tau2)).mean(dim=1)
             d_all = d
             if self.feat is not None and cfg.feature_weight > 0:
-                df = _sample(Dfeat, _transform(self.feat, p))
+                df = _sample(Dfeat, _transform(self.feat, p), off)
                 rf = ((df * df) / (df * df + tau2)).mean(dim=1)
                 edge = (edge + cfg.feature_weight * rf) / (1.0 + cfg.feature_weight)
                 d_all = torch.cat([d, df], dim=1)
@@ -483,6 +670,7 @@ class ShapeFitter:
         # Only carry a confident pose forward. Warm-starting from a bad fit is
         # how trackers get permanently lost after a single hard frame.
         self.prev = pose.as_array() if conf >= cfg.recovery_conf else None
+        self._note_scales(pose.sx, pose.sy, conf)
         return pose
 
     def feature_outline(self, pose: Pose) -> np.ndarray | None:

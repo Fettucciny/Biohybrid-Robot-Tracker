@@ -81,6 +81,13 @@ DEFAULTS: dict[str, Any] = {
     "feature_weight": 1.0,
     "scale_prior_weight": 0.35,
     "max_scale_change": 0.60,
+    # Anisotropy. The drawing's width is a fixed property of the robot; its
+    # length is the measurement. The two are therefore not constrained alike --
+    # see register.FitConfig for the full argument.
+    "width_weight": 2.0,
+    "width_tol_pct": 4.0,           # sigma of the width hold, % of nominal
+    "width_max_change_pct": 15.0,   # hard clamp on the width scale, %
+    "length_overshoot_px": 3.0,     # how far length may exceed the drawing
 
     # --- analysis --------------------------------------------------------
     "smooth_ms": 100.0,
@@ -102,7 +109,10 @@ DEFAULTS: dict[str, Any] = {
     # session would defeat the point of having placed it once.
     "manual_placement": False,
     "manual_pose": None,            # [tx, ty, theta, sx, sy] in full-resolution px
-    "roi": None,                    # [x, y, w, h] in full-resolution px, or None
+    # [x, y, w, h] or [x, y, w, h, angle_deg] in full-resolution px, or None.
+    # Four values means an upright region and is what builds before 0.17 wrote;
+    # the fifth is the rotation about the region's own centre. Both are read.
+    "roi": None,
     "traj_hz": 0.0,                 # trajectory sampling rate; 0 = every frame
 
     # --- updates ---------------------------------------------------------
@@ -124,6 +134,14 @@ DEFAULTS: dict[str, Any] = {
 
     # --- appearance ------------------------------------------------------
     "theme_mode": "dark",           # "dark" or "light"
+    # "simple" shows the controls a run actually needs; "advanced" adds the
+    # solver and morphology internals. Stored rather than defaulted every launch
+    # because someone who has chosen simple has chosen it for good.
+    "ui_mode": "simple",
+    # {card key: True if collapsed}. Only keys the user has actually toggled
+    # appear, so adding a new section later gets its designed default rather
+    # than whatever an old settings file happens to imply.
+    "collapsed_sections": {},
 
     # --- window ----------------------------------------------------------
     "window_geometry": "",          # base64 QByteArray from saveGeometry()

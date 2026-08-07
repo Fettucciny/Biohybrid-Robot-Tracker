@@ -49,8 +49,8 @@ from .forcemodel import BeamForceModel
 from .placement import PreviewView
 from .plotpanel import PlotPanel
 from .register import FitConfig, ShapeFitter
-from .segment import (ColorModel, SegmentConfig, choose_color_model, color_distance,
-                      build_background, largest_component, segment_color,
+from .segment import (ColorModel, SegmentConfig, build_background,
+                      choose_color_model, largest_component, segment_color_d,
                       segment_frame)
 from .shape import measure_mask
 from .theme import (ACCENT, C, Card, HelpBadge, apply as apply_theme,
@@ -214,17 +214,17 @@ class PreviewWorker(QThread):
             dev = get_device(self.gpu)
             min_area = self.seg_cfg.min_area_frac * self.reader.width * self.reader.height
 
+            dist = None
             if color:
-                m, thr = segment_color(frame, self.seg_cfg, self.model.bg_ab,
-                                        self.model.separation,
-                                        self.seg_cfg.manual_threshold)
+                m, thr, dist = segment_color_d(frame, self.seg_cfg, self.model.bg_ab,
+                                               self.model.separation,
+                                               self.seg_cfg.manual_threshold)
                 if self.view == "chroma":
                     # What the segmenter actually sees: distance from the
                     # medium's color. The threshold is a horizontal cut through
                     # this surface, so a mask that looks wrong is diagnosed here
                     # rather than guessed at from the photograph.
-                    d = color_distance(frame, self.model.bg_ab)
-                    scaled = np.clip(d / max(self.model.separation, 1e-6) * 255.0,
+                    scaled = np.clip(dist / max(self.model.separation, 1e-6) * 255.0,
                                      0, 255).astype(np.uint8)
                     img = cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS)
                 else:
@@ -255,7 +255,7 @@ class PreviewWorker(QThread):
                 # doing that per keystroke was pure overhead.
                 fitter = self.fitter or ShapeFitter(self.tpl, self.fit_cfg, dev,
                                                     seed_pose=self.seed)
-                sig = (color_distance(frame, self.model.bg_ab) if color else
+                sig = (dist if color else
                        (frame if frame.ndim == 2 else
                         cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
                 pose = fitter.fit(mask, signal=sig)
@@ -334,16 +334,15 @@ class PlaybackWorker(QThread):
                     continue
                 self._last = i
                 if color:
-                    m, thr = segment_color(frame, self.seg_cfg, self.model.bg_ab,
-                                            self.model.separation,
-                                            self.seg_cfg.manual_threshold)
+                    m, thr, d = segment_color_d(frame, self.seg_cfg, self.model.bg_ab,
+                                                self.model.separation,
+                                                self.seg_cfg.manual_threshold)
                     # Playback follows the View selector rather than always
                     # showing the photograph. Watching the chroma surface move
                     # is how you see the cut about to fail -- the moment the
                     # robot's distance from the medium dips toward the
                     # threshold is visible here and invisible in the video.
                     if self.view == "chroma":
-                        d = color_distance(frame, self.model.bg_ab)
                         scaled = np.clip(d / max(self.model.separation, 1e-6) * 255.0,
                                          0, 255).astype(np.uint8)
                         img = cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS)
@@ -530,8 +529,17 @@ class MainWindow(QMainWindow):
         # Manual placement, stored in *full-resolution* image pixels so it
         # survives a change of decode scale.
         self.manual_pose: list[float] | None = self.state.get("manual_pose")
-        self.roi: list[int] | None = self.state.get("roi") or None
+        self.roi: list | None = self.state.get("roi") or None
         self._last_fit_pose: list[float] | None = None
+
+        # Panel state. Read before the sidebar is built, because the sidebar
+        # restores from it rather than the other way round.
+        self.ui_mode = ("advanced" if str(self.state.get("ui_mode", "simple")).lower()
+                        == "advanced" else "simple")
+        raw = self.state.get("collapsed_sections") or {}
+        self.collapsed_sections: dict[str, bool] = (
+            {str(k): bool(v) for k, v in raw.items()} if isinstance(raw, dict) else {})
+        self.cards: dict = {}
 
         # Dragging a slider fires many changes and each preview costs a decode
         # plus a fit, so coalesce them into a single render.
@@ -597,6 +605,10 @@ class MainWindow(QMainWindow):
 
         self._apply_state(self.state)
         self._on_force_method()
+        # After _apply_state, so anything it hid for its own reasons -- the DXF
+        # outline chooser, the manual-threshold box -- is already hidden when
+        # the mode filter runs and does not get un-hidden by it.
+        self._restore_sections()
         self._wire_persistence()
         U.mark_overlay_verified()       # this build imports; trust the overlay
         QTimer.singleShot(0, self._after_show)
@@ -667,6 +679,14 @@ class MainWindow(QMainWindow):
                   self.chip_version):
             lay.addWidget(c)
 
+        # Two small toggles, in the order the eye reads them: what is shown,
+        # then how it looks. Both are one click and both are remembered.
+        self.btn_mode = QPushButton("")
+        self.btn_mode.setObjectName("Ghost")
+        self.btn_mode.setFixedWidth(78)
+        self.btn_mode.clicked.connect(self._toggle_ui_mode)
+        lay.addWidget(self.btn_mode)
+
         self.btn_theme = QPushButton("")
         self.btn_theme.setObjectName("Ghost")
         self.btn_theme.setFixedWidth(64)
@@ -692,8 +712,14 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(0, 0, 8, 0)
         v.setSpacing(11)
 
+        # Cards are built here in whatever order is convenient and *added* in
+        # SIDEBAR_ORDER at the end, so the order a reader sees on screen is
+        # stated in one place instead of being an accident of which control was
+        # written first.
+        cards: dict[str, Card] = {}
+
         # -------------------------------------------------- input
-        c = Card("Input")
+        c = cards["input"] = Card("Input", key="input")
         self.btn_video = QPushButton("Choose video…")
         self.btn_video.clicked.connect(self._pick_video)
         self.lbl_video = QLabel("none selected"); self.lbl_video.setObjectName("Hint")
@@ -754,10 +780,9 @@ class MainWindow(QMainWindow):
         self.lbl_info = QLabel(""); self.lbl_info.setObjectName("Readout")
         self.lbl_info.setWordWrap(True)
         c.add_widget(self.lbl_info)
-        v.addWidget(c)
 
         # -------------------------------------------------- segmentation
-        c = Card("Segmentation")
+        c = cards["segmentation"] = Card("Segmentation", key="segmentation")
         self.cmb_keying = QComboBox()
         self.cmb_keying.addItems(["Auto", "Color (a*b*)", "Brightness"])
         self.cmb_keying.currentIndexChanged.connect(self._reload_needed)
@@ -772,7 +797,7 @@ class MainWindow(QMainWindow):
         self.spin_env = QDoubleSpinBox(); self.spin_env.setRange(1.0, 4.0)
         self.spin_env.setSingleStep(0.05); self.spin_env.setValue(1.10)
         self.spin_env.valueChanged.connect(self._on_param)
-        c.add_row("Body envelope", self.spin_env, HELP["envelope"])
+        c.add_row("Body envelope", self.spin_env, HELP["envelope"], advanced=True)
 
         self.cmb_thr = QComboBox(); self.cmb_thr.addItems(["Auto (Otsu)", "Manual"])
         self.cmb_thr.currentIndexChanged.connect(self._on_thr_mode)
@@ -786,39 +811,42 @@ class MainWindow(QMainWindow):
         self.spin_open = QSpinBox(); self.spin_open.setRange(1, 31)
         self.spin_open.setSingleStep(2); self.spin_open.setValue(3); self.spin_open.setSuffix(" px")
         self.spin_open.valueChanged.connect(self._on_param)
-        c.add_row("Despeckle", self.spin_open, HELP["despeckle"])
+        c.add_row("Despeckle", self.spin_open, HELP["despeckle"], advanced=True)
 
         self.spin_close = QSpinBox(); self.spin_close.setRange(1, 41)
         self.spin_close.setSingleStep(2); self.spin_close.setValue(7); self.spin_close.setSuffix(" px")
         self.spin_close.valueChanged.connect(self._on_param)
-        c.add_row("Fill holes", self.spin_close, HELP["fill_holes"])
+        c.add_row("Fill holes", self.spin_close, HELP["fill_holes"], advanced=True)
 
         self.spin_minarea = QDoubleSpinBox(); self.spin_minarea.setDecimals(4)
         self.spin_minarea.setRange(0.0010, 1.0000); self.spin_minarea.setSingleStep(0.005)
         self.spin_minarea.setValue(0.0500); self.spin_minarea.setSuffix(" %")
         self.spin_minarea.valueChanged.connect(self._on_param)
-        c.add_row("Min blob size", self.spin_minarea, HELP["min_area"])
+        c.add_row("Min blob size", self.spin_minarea, HELP["min_area"], advanced=True)
 
         self.spin_gap = QDoubleSpinBox(); self.spin_gap.setRange(0.0, 3.0)
         self.spin_gap.setSingleStep(0.1); self.spin_gap.setValue(1.0)
         self.spin_gap.setSuffix(" × body")
         self.spin_gap.valueChanged.connect(self._on_param)
-        c.add_row("Occlusion gap", self.spin_gap, HELP["gap_factor"])
+        c.add_row("Occlusion gap", self.spin_gap, HELP["gap_factor"], advanced=True)
 
         self.spin_bg = QSpinBox(); self.spin_bg.setRange(10, 400); self.spin_bg.setValue(60)
         self.spin_bg.setSuffix(" frames")
         self.spin_bg.valueChanged.connect(self._reload_needed)
-        c.add_row("Background", self.spin_bg, HELP["background_frames"])
+        c.add_row("Background", self.spin_bg, HELP["background_frames"], advanced=True)
 
         self.btn_rebuild = QPushButton("Rebuild background")
         self.btn_rebuild.setObjectName("Ghost")
         self.btn_rebuild.clicked.connect(self._reload)
         self.btn_rebuild.setVisible(False)
-        c.add_widget(self.btn_rebuild)
-        v.addWidget(c)
+        c.add_widget(self.btn_rebuild, advanced=True)
 
         # -------------------------------------------------- fitting
-        c = Card("Shape fitting")
+        # The whole card is advanced. Nothing in it needs changing to analyse a
+        # clip -- it is the solver's own dials, and the defaults are the ones
+        # every number in the README was measured with.
+        c = cards["fitting"] = Card("Shape fitting", key="shape_fitting",
+                                     advanced=True)
         self.spin_tau = QDoubleSpinBox(); self.spin_tau.setRange(1, 60); self.spin_tau.setValue(12)
         self.spin_tau.setSuffix(" px"); self.spin_tau.valueChanged.connect(self._on_param)
         c.add_row("Kernel τ start", self.spin_tau, HELP["tau"])
@@ -865,10 +893,30 @@ class MainWindow(QMainWindow):
         self.spin_maxscale = QDoubleSpinBox(); self.spin_maxscale.setRange(0.10, 0.95)
         self.spin_maxscale.setSingleStep(0.05); self.spin_maxscale.setValue(0.60)
         c.add_row("Max size change", self.spin_maxscale, HELP["max_scale"])
-        v.addWidget(c)
+
+        rule_a = QFrame(); rule_a.setObjectName("cardRule"); rule_a.setFixedHeight(1)
+        c.add_widget(rule_a)
+
+        self.spin_widthw = QDoubleSpinBox(); self.spin_widthw.setRange(0.0, 20.0)
+        self.spin_widthw.setSingleStep(0.5); self.spin_widthw.setValue(2.0)
+        self.spin_widthw.setSpecialValueText("off")
+        self.spin_widthw.valueChanged.connect(self._on_param)
+        c.add_row("Width hold", self.spin_widthw, HELP["width_weight"])
+
+        self.spin_widthtol = QDoubleSpinBox(); self.spin_widthtol.setRange(0.5, 30.0)
+        self.spin_widthtol.setSingleStep(0.5); self.spin_widthtol.setValue(4.0)
+        self.spin_widthtol.setSuffix(" %")
+        self.spin_widthtol.valueChanged.connect(self._on_param)
+        c.add_row("Width tolerance", self.spin_widthtol, HELP["width_tol"])
+
+        self.spin_lenover = QDoubleSpinBox(); self.spin_lenover.setRange(0.0, 60.0)
+        self.spin_lenover.setSingleStep(0.5); self.spin_lenover.setValue(3.0)
+        self.spin_lenover.setSuffix(" px")
+        self.spin_lenover.valueChanged.connect(self._on_param)
+        c.add_row("Length overshoot", self.spin_lenover, HELP["length_overshoot"])
 
         # -------------------------------------------------- force
-        c = Card("Force")
+        c = cards["force"] = Card("Force", key="force")
         self.cmb_force = QComboBox()
         self.cmb_force.addItems(["Simulated LUT (COMSOL)", "Cvetkovic Model"])
         self.cmb_force.setCurrentIndex(1)
@@ -912,16 +960,16 @@ class MainWindow(QMainWindow):
         self.cmb_rest = QComboBox()
         self.cmb_rest.addItems(["Maximum (Cvetkovic Model)", "Robust (upper quartile)"])
         self.cmb_rest.currentIndexChanged.connect(self._on_beam_changed)
-        self.beam_rows.append(c.add_row("Resting length", self.cmb_rest, HELP["beam_rest"]))
+        self.beam_rows.append(c.add_row("Resting length", self.cmb_rest, HELP["beam_rest"],
+                                advanced=True))
 
         self.lbl_beam = QLabel(""); self.lbl_beam.setObjectName("Readout")
         self.lbl_beam.setWordWrap(True)
         c.add_widget(self.lbl_beam)
         self.beam_rows.append(self.lbl_beam)
-        v.addWidget(c)
 
         # -------------------------------------------------- placement
-        c = Card("Target placement")
+        c = cards["placement"] = Card("Target placement", key="target_placement")
         self.chk_manual = QCheckBox("Place the outline by hand")
         self.chk_manual.stateChanged.connect(self._on_manual_toggled)
         rowm = QWidget(); rm = QHBoxLayout(rowm); rm.setContentsMargins(0, 0, 0, 0); rm.setSpacing(7)
@@ -978,16 +1026,15 @@ class MainWindow(QMainWindow):
         ra2.setContentsMargins(0, 0, 0, 0); ra2.setSpacing(7)
         ra2.addWidget(self.chk_appearance); ra2.addWidget(HelpBadge(HELP["appearance"]))
         ra2.addStretch(1)
-        c.add_widget(rowa2)
+        c.add_widget(rowa2, advanced=True)
 
         self.btn_roi_clear = QPushButton("Clear region")
         self.btn_roi_clear.setObjectName("Ghost")
         self.btn_roi_clear.clicked.connect(self._clear_roi)
         c.add_widget(self.btn_roi_clear)
-        v.addWidget(c)
 
         # -------------------------------------------------- analysis
-        c = Card("Analysis")
+        c = cards["analysis"] = Card("Analysis", key="analysis")
         self.spin_smooth = QDoubleSpinBox(); self.spin_smooth.setRange(0, 2000)
         self.spin_smooth.setValue(100); self.spin_smooth.setSuffix(" ms")
         c.add_row("Smoothing", self.spin_smooth, HELP["smoothing"])
@@ -998,16 +1045,15 @@ class MainWindow(QMainWindow):
 
         self.spin_gapms = QDoubleSpinBox(); self.spin_gapms.setRange(0, 5000)
         self.spin_gapms.setValue(400); self.spin_gapms.setSuffix(" ms")
-        c.add_row("Max bridged gap", self.spin_gapms, HELP["max_gap"])
+        c.add_row("Max bridged gap", self.spin_gapms, HELP["max_gap"], advanced=True)
 
         self.spin_ppm = QDoubleSpinBox(); self.spin_ppm.setRange(0, 10000)
         self.spin_ppm.setDecimals(3); self.spin_ppm.setSpecialValueText("auto")
         self.spin_ppm.setSuffix(" px/mm")
         c.add_row("Calibration", self.spin_ppm, HELP["px_per_mm"])
-        v.addWidget(c)
 
         # -------------------------------------------------- output
-        c = Card("Output")
+        c = cards["output"] = Card("Output", key="output")
         self.cmb_scale = QComboBox(); self.cmb_scale.addItems(["1.0 — full", "0.5 — half", "0.25 — quarter"])
         self.cmb_scale.currentIndexChanged.connect(self._reload_needed)
         c.add_row("Decode scale", self.cmb_scale, HELP["decode_scale"])
@@ -1022,34 +1068,45 @@ class MainWindow(QMainWindow):
         r2 = QWidget(); rh2 = QHBoxLayout(r2); rh2.setContentsMargins(0, 0, 0, 0); rh2.setSpacing(7)
         rh2.addWidget(self.chk_gpu); rh2.addWidget(HelpBadge(HELP["gpu"])); rh2.addStretch(1)
         c.add_widget(r2)
-        v.addWidget(c)
 
         # -------------------------------------------------- configuration
-        c = Card("Configuration")
-        note = QLabel("Every setting here is remembered between sessions. "
-                      "Save one to a file to reproduce a run, or to share it.")
-        note.setObjectName("Hint"); note.setWordWrap(True)
-        c.add_widget(note)
-
-        rowc = QWidget(); rc = QHBoxLayout(rowc); rc.setContentsMargins(0, 0, 0, 0); rc.setSpacing(7)
-        self.btn_cfg_save = QPushButton("Save config…"); self.btn_cfg_save.setObjectName("Ghost")
-        self.btn_cfg_load = QPushButton("Load config…"); self.btn_cfg_load.setObjectName("Ghost")
+        # Pinned, never collapsible, and deliberately the most compact card in
+        # the column: it is the only one that is about the program rather than
+        # about the experiment, so it should be reachable at all times and take
+        # as little room as possible while being so. The paragraph that used to
+        # explain it is a tooltip now -- it was three lines of text explaining
+        # two buttons whose labels already say what they do.
+        c = cards["configuration"] = Card("Configuration", key="configuration",
+                                          collapsible=False, compact=True)
+        rowc = QWidget(); rc = QHBoxLayout(rowc); rc.setContentsMargins(0, 0, 0, 0); rc.setSpacing(6)
+        self.btn_cfg_save = QPushButton("Save…"); self.btn_cfg_save.setObjectName("Ghost")
+        self.btn_cfg_load = QPushButton("Load…"); self.btn_cfg_load.setObjectName("Ghost")
+        self.btn_cfg_reset = QPushButton("Reset"); self.btn_cfg_reset.setObjectName("Ghost")
+        self.btn_cfg_save.setToolTip("Write every current setting to a .rtcfg file, "
+                                     "so this run can be reproduced or shared")
+        self.btn_cfg_load.setToolTip("Load settings from a .rtcfg file")
+        self.btn_cfg_reset.setToolTip("Return every setting to the value the app ships with")
         self.btn_cfg_save.clicked.connect(self._save_config)
         self.btn_cfg_load.clicked.connect(self._load_config)
-        rc.addWidget(self.btn_cfg_save, 1); rc.addWidget(self.btn_cfg_load, 1)
-        c.add_widget(rowc)
-
-        self.btn_cfg_reset = QPushButton("Reset to defaults")
-        self.btn_cfg_reset.setObjectName("Ghost")
         self.btn_cfg_reset.clicked.connect(self._reset_config)
-        c.add_widget(self.btn_cfg_reset)
+        for b in (self.btn_cfg_save, self.btn_cfg_load, self.btn_cfg_reset):
+            rc.addWidget(b, 1)
+        c.add_widget(rowc)
 
         self.chk_update_start = QCheckBox("check for updates at launch")
         rowu = QWidget(); ru = QHBoxLayout(rowu); ru.setContentsMargins(0, 0, 0, 0); ru.setSpacing(7)
         ru.addWidget(self.chk_update_start); ru.addWidget(HelpBadge(HELP["update_channel"]))
         ru.addStretch(1)
         c.add_widget(rowu)
-        v.addWidget(c)
+
+        # ---- assemble, in the order work actually happens in ----------------
+        self.cards = cards
+        for key in self.SIDEBAR_ORDER:
+            card = cards.get(key)
+            if card is None:
+                continue
+            card.toggled.connect(self._on_card_toggled)
+            v.addWidget(card)
 
         # Run, the progress bar and the log all live in the viewer column now.
         # The button belongs next to the thing it acts on, and the log belongs
@@ -1060,6 +1117,48 @@ class MainWindow(QMainWindow):
         scroll.setWidget(inner)
         scroll.setMinimumWidth(400)
         return scroll
+
+    # Configuration first because it is not part of the workflow and should not
+    # move; the rest in the order a clip passes through the program -- what you
+    # loaded, where the robot is, how it is told apart from the medium, how the
+    # outline is fitted to it, what that becomes in newtons, how the series is
+    # cleaned up, and what gets written out.
+    SIDEBAR_ORDER = ("configuration", "input", "placement", "segmentation",
+                     "fitting", "force", "analysis", "output")
+
+    # Sections that start closed for someone who has never opened the program.
+    # Only two: a column of collapsed boxes is as unhelpful as an endless one,
+    # and these are the two nobody needs on a first run.
+    DEFAULT_COLLAPSED = {"shape_fitting", "output"}
+
+    # ---- panel state -----------------------------------------------------
+
+    def _on_card_toggled(self, key: str, collapsed: bool) -> None:
+        self.collapsed_sections[key] = bool(collapsed)
+        self._touch()
+
+    def _restore_sections(self) -> None:
+        """Apply the remembered collapsed state, then the simple/advanced mode."""
+        for key, card in self.cards.items():
+            want = self.collapsed_sections.get(key, key in self.DEFAULT_COLLAPSED)
+            card.set_collapsed(bool(want))
+        self._apply_ui_mode()
+
+    def _toggle_ui_mode(self) -> None:
+        self.ui_mode = "simple" if self.ui_mode == "advanced" else "advanced"
+        self._apply_ui_mode()
+        self._touch()
+
+    def _apply_ui_mode(self) -> None:
+        advanced = self.ui_mode == "advanced"
+        for card in self.cards.values():
+            card.setVisible(card.set_show_advanced(advanced))
+        self.btn_mode.setText("Advanced" if advanced else "Simple")
+        self.btn_mode.setToolTip(
+            "Showing every control, including the solver's own settings. "
+            "Click for the short list." if advanced else
+            "Showing the controls a run needs. Click to reveal the solver "
+            "settings and the morphology parameters as well.")
 
     # ---- viewer ----------------------------------------------------------
 
@@ -1541,6 +1640,9 @@ class MainWindow(QMainWindow):
                             if self.chk_features.isChecked() else 0.0),
             scale_prior_weight=self.spin_prior.value(),
             max_scale_change=self.spin_maxscale.value(),
+            width_weight=self.spin_widthw.value(),
+            width_tol=max(self.spin_widthtol.value(), 0.1) / 100.0,
+            length_overshoot_px=self.spin_lenover.value(),
         )
 
     def _ana_cfg(self) -> AnalysisConfig:
@@ -1601,6 +1703,9 @@ class MainWindow(QMainWindow):
             "coverage_weight": spin(self.spin_cover),
             "scale_prior_weight": spin(self.spin_prior),
             "max_scale_change": spin(self.spin_maxscale),
+            "width_weight": spin(self.spin_widthw),
+            "width_tol_pct": spin(self.spin_widthtol),
+            "length_overshoot_px": spin(self.spin_lenover),
             "smooth_ms": spin(self.spin_smooth),
             "min_confidence": spin(self.spin_conf),
             "max_gap_ms": spin(self.spin_gapms),
@@ -1622,6 +1727,8 @@ class MainWindow(QMainWindow):
         st["dxf_path"] = self.dxf or ""
         st["output_dir"] = self.outdir or ""
         st["roi"] = list(self.roi) if self.roi else None
+        st["ui_mode"] = self.ui_mode
+        st["collapsed_sections"] = dict(self.collapsed_sections)
         st["traj_hz"] = float(self.plots.spin_traj.value())
         st["manual_pose"] = list(self.manual_pose) if self.manual_pose else None
         st["force_lut_path"] = self.lut_path or ""
@@ -2283,7 +2390,8 @@ class MainWindow(QMainWindow):
         on = self.chk_roi.isChecked()
         self.view.set_roi(self.roi, edit=on)
         if on:
-            self._log("drag on the video to draw the region to track inside.")
+            self._log("drag on the video to draw the region to track inside; "
+                      "then drag its edges to resize, or the grip above it to rotate.")
         self._sync_roi_label()
 
     def _on_roi_drawn(self, roi):
@@ -2307,11 +2415,16 @@ class MainWindow(QMainWindow):
                 "brighter or more saturated than the robot — the color model is "
                 "estimated inside the region, not just clipped to it.")
             return
-        x, y, w, h = self.roi
+        x, y, w, h = self.roi[:4]
+        ang = float(self.roi[4]) if len(self.roi) > 4 else 0.0
         frac = ""
         if self.info is not None and self.info.width and self.info.height:
             frac = f" — {100.0 * w * h / (self.info.width * self.info.height):.0f}% of the frame"
-        self.lbl_roi.setText(f"Tracking inside {w} × {h} px at ({x}, {y}){frac}.")
+        turned = f", turned {ang:+.1f}°" if abs(ang) > 0.05 else ""
+        self.lbl_roi.setText(
+            f"Tracking inside {w} × {h} px at ({x}, {y}){turned}{frac}. "
+            "Drag an edge or corner to resize, the round grip to rotate "
+            "(hold Shift for 15° steps), or inside it to move.")
 
     # ---- appearance ------------------------------------------------------
 
@@ -2805,7 +2918,11 @@ class MainWindow(QMainWindow):
             # The appearance lock learns from the frame you are looking at, the
             # region you drew, and whatever pose is currently fitted there --
             # which is why it is worth scrubbing to a clean frame first.
-            appearance=((self._current_time(), tuple(self.roi),
+            # The appearance patch is an upright crop: any rotation on the
+            # region is deliberately dropped here rather than silently baked in,
+            # because the tracker recovers rotation itself and a pre-rotated
+            # reference would double-count it.
+            appearance=((self._current_time(), tuple(self.roi[:4]),
                          self._last_pose_obj())
                         if (self.chk_appearance.isChecked() and self.roi) else None),
             known_width_mm=(self.spin_width.value() or None),

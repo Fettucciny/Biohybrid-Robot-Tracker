@@ -153,7 +153,8 @@ class Result:
             return []
         parts = "  ".join(f"{k} {1000 * v / n:.0f} ms ({100 * v / total:.0f}%)"
                           for k, v in sorted(st.items(), key=lambda kv: -kv[1]))
-        lines = [f"  time per frame   : {parts}"]
+        lines = [f"  time per frame   : {parts}",
+                 f"  throughput       : {n / total:.1f} frames/s over {n} frames"]
         if not self.device.accelerated:
             lines.append("  WARNING          : running on the CPU. The fit is the "
                          "dominant cost and is roughly 20x slower here than on an "
@@ -245,6 +246,10 @@ def _fit_signal(m, seg):
     In color mode that is the distance from the medium's color, which is where
     the internal boundaries actually live; in luma mode it is the frame itself.
     """
+    # The segmenter already built this to cut the mask with. Recomputing it was
+    # a straight duplicate of the single most expensive operation in the loop.
+    if getattr(m, "signal", None) is not None:
+        return m.signal
     if m.frame is None:
         return None
     if getattr(seg, "color", False) and seg.model.bg_ab is not None:
@@ -351,7 +356,9 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         ref_frame = ref_reader.read_at(float(ref_t))
         if ref_frame is None:
             raise RuntimeError(f"could not decode the reference frame at {ref_t:.2f} s")
-        rect = tuple(int(round(v * cfg.scale)) for v in ref_rect)
+        # Four values only: the appearance patch is an upright crop, and a
+        # rotated region carries a fifth that must not be scaled like a length.
+        rect = tuple(int(round(float(v) * cfg.scale)) for v in tuple(ref_rect)[:4])
         tracker = AppearanceTracker(ref_frame, rect, ref_pose, AppearanceConfig())
 
     t_seg = t_fit = t_draw = 0.0

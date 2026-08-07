@@ -1,6 +1,6 @@
 """BioHybrid RoboTracker -- GPU-accelerated tracking of muscle-driven soft robots."""
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 # The name shown to people, kept apart from the import name.
 #

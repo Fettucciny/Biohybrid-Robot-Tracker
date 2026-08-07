@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, Signal
 from PySide6.QtGui import QCursor, QFont
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
@@ -216,6 +216,11 @@ QLabel#CardTitle {{
     font-size: 8pt;
     font-weight: 600;
     letter-spacing: 1.3px;
+}}
+QLabel#CardChevron {{
+    color: {M.TEXT_DIM};
+    font-size: 9pt;
+    min-width: 11px;
 }}
 QLabel#FieldLabel {{ color: {M.TEXT_MUTED}; }}
 QLabel#Hint {{ color: {M.TEXT_DIM}; font-size: 9pt; }}
@@ -414,33 +419,88 @@ class HelpBadge(QToolButton):
 # --------------------------------------------------------------------------
 
 class Card(QFrame):
-    """Titled panel. ``body`` is a QVBoxLayout callers add rows to."""
+    """Titled, collapsible panel. ``body`` is a QVBoxLayout callers add rows to.
 
-    def __init__(self, title: str, parent: QWidget | None = None):
+    Two independent ways a row can be hidden, which are deliberately not the
+    same mechanism:
+
+    **Collapsed** is the user's choice about *this* card, taken by clicking its
+    title, and it is remembered between sessions. It hides everything.
+
+    **Advanced** is a property of the row itself, declared where the row is
+    built. A row marked advanced is one you would change while developing a
+    protocol and never touch again while running it. Simple mode hides those
+    everywhere at once, so someone handed the program can see the six controls
+    that matter rather than the forty that exist.
+
+    A card whose rows are *all* advanced disappears entirely in simple mode --
+    an empty titled box is worse than no box.
+    """
+
+    toggled = Signal(str, bool)         # (key, collapsed)
+
+    def __init__(self, title: str, parent: QWidget | None = None,
+                 key: str | None = None, collapsible: bool = True,
+                 compact: bool = False, advanced: bool = False):
         super().__init__(parent)
         # Styled from the application stylesheet, deliberately. A per-widget
         # setStyleSheet wins over the app's, so cards that carried their own
         # background stayed dark navy forever -- a light-mode window with a
         # column of dark cards in it, which is exactly what happened.
         self.setObjectName("card")
+        self.key = key or title.lower().replace(" ", "_")
+        self.title = title
+        self.card_advanced = bool(advanced)
+        self._collapsible = bool(collapsible)
+        self._collapsed = False
+        self._advanced_rows: list[QWidget] = []
+        self._rows: list[QWidget] = []
+
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(14, 12, 14, 13)
-        outer.setSpacing(9)
+        pad = 9 if compact else 14
+        outer.setContentsMargins(pad + 5, pad - 2, pad + 5, pad - 1)
+        outer.setSpacing(6 if compact else 9)
 
-        head = QLabel(title.upper())
-        head.setObjectName("CardTitle")
+        head = QWidget()
+        hh = QHBoxLayout(head)
+        hh.setContentsMargins(0, 0, 0, 0)
+        hh.setSpacing(6)
+        # The chevron is a label rather than a button so the whole header strip
+        # is one click target. A 9x9 arrow is a miserable thing to have to hit.
+        self._chevron = QLabel("▾")
+        self._chevron.setObjectName("CardChevron")
+        self._label = QLabel(title.upper())
+        self._label.setObjectName("CardTitle")
+        hh.addWidget(self._chevron)
+        hh.addWidget(self._label)
+        hh.addStretch(1)
+        self._head = head
         outer.addWidget(head)
+        if self._collapsible:
+            head.setCursor(QCursor(Qt.PointingHandCursor))
+            head.mouseReleaseEvent = self._on_head_click
+            head.setToolTip("Click to collapse or expand this section")
+        else:
+            self._chevron.setVisible(False)
 
-        rule = QFrame()
-        rule.setObjectName("cardRule")
-        rule.setFixedHeight(1)
-        outer.addWidget(rule)
+        self._rule = QFrame()
+        self._rule.setObjectName("cardRule")
+        self._rule.setFixedHeight(1)
+        outer.addWidget(self._rule)
 
-        self.body = QVBoxLayout()
-        self.body.setSpacing(8)
-        outer.addLayout(self.body)
+        # The rows live in a host widget rather than straight in the layout, so
+        # collapsing is one setVisible instead of a walk over every child --
+        # and so a hidden row's own visibility is preserved across a collapse.
+        self._host = QWidget()
+        self.body = QVBoxLayout(self._host)
+        self.body.setContentsMargins(0, 0, 0, 0)
+        self.body.setSpacing(6 if compact else 8)
+        outer.addWidget(self._host)
 
-    def add_row(self, label: str, widget: QWidget, spec: dict | None = None) -> QWidget:
+    # ---- building --------------------------------------------------------
+
+    def add_row(self, label: str, widget: QWidget, spec: dict | None = None,
+                advanced: bool = False) -> QWidget:
         """One labeled control with an optional (?) badge."""
         row = QWidget()
         h = QHBoxLayout(row)
@@ -457,10 +517,61 @@ class Card(QFrame):
         widget.setMinimumWidth(128)
         h.addWidget(widget)
         self.body.addWidget(row)
+        self._register(row, advanced)
         return row
 
-    def add_widget(self, w: QWidget) -> None:
+    def add_widget(self, w: QWidget, advanced: bool = False) -> None:
         self.body.addWidget(w)
+        self._register(w, advanced)
+
+    def _register(self, w: QWidget, advanced: bool) -> None:
+        self._rows.append(w)
+        if advanced:
+            self._advanced_rows.append(w)
+
+    # ---- state -----------------------------------------------------------
+
+    def _on_head_click(self, ev) -> None:
+        if ev.button() == Qt.LeftButton:
+            self.set_collapsed(not self._collapsed)
+            self.toggled.emit(self.key, self._collapsed)
+
+    def set_collapsed(self, on: bool) -> None:
+        if not self._collapsible:
+            on = False
+        self._collapsed = bool(on)
+        self._host.setVisible(not self._collapsed)
+        self._rule.setVisible(not self._collapsed)
+        self._chevron.setText("▸" if self._collapsed else "▾")
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def set_show_advanced(self, on: bool) -> bool:
+        """Apply simple/advanced mode. Returns whether the card has anything left.
+
+        Rows the caller has hidden for its own reasons -- a DXF outline chooser
+        with one candidate, a manual-threshold box in auto mode -- must stay
+        hidden, so switching to advanced only *un*hides rows this method hid.
+
+        ``isHidden`` rather than ``not isVisible``: the two differ exactly while
+        the window has not been shown yet, which is when this first runs. Every
+        widget is invisible at that point, so the ``isVisible`` spelling
+        concluded there was nothing to hide and simple mode came up showing
+        everything until the user toggled it twice.
+        """
+        for w in self._advanced_rows:
+            if on:
+                if w.property("_hidden_by_mode"):
+                    w.setProperty("_hidden_by_mode", False)
+                    w.setVisible(True)
+            elif not w.isHidden():
+                w.setProperty("_hidden_by_mode", True)
+                w.setVisible(False)
+        if self.card_advanced and not on:
+            return False
+        # Every row advanced and advanced is off: nothing to show.
+        return on or len(self._advanced_rows) < len(self._rows) or not self._rows
 
 
 def style_chip(lab: QLabel, kind: str = "") -> None:

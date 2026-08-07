@@ -36,11 +36,29 @@ import math
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import (QColor, QCursor, QPainter, QPainterPath, QPen, QPixmap,
+                           QPolygonF)
 from PySide6.QtWidgets import QLabel
 
 HANDLE_R = 7.0          # handle radius, widget pixels
 GRAB_SLOP = 11.0        # how close the cursor must be to grab one
+ROI_HANDLE = 4.5        # half-width of a region handle square, widget pixels
+ROI_MIN_PX = 16.0       # a region smaller than this is a mis-click, not an intent
+ROI_ROT_ARM = 26.0      # how far the rotate grip sits above the top edge
+
+# Which edges each region handle moves, in the region's own frame: (u, v) with
+# -1 meaning the low edge, +1 the high edge and 0 "leave this axis alone".
+ROI_HANDLES = {
+    "nw": (-1, -1), "n": (0, -1), "ne": (1, -1), "e": (1, 0),
+    "se": (1, 1), "s": (0, 1), "sw": (-1, 1), "w": (-1, 0),
+}
+ROI_CURSORS = {
+    "nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
+    "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
+    "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
+    "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor,
+    "roi_rot": Qt.CrossCursor, "roi_body": Qt.SizeAllCursor,
+}
 
 
 def transform_points(pts: np.ndarray, pose) -> np.ndarray:
@@ -50,6 +68,28 @@ def transform_points(pts: np.ndarray, pose) -> np.ndarray:
     y = pts[:, 1] * sy
     c, s = math.cos(th), math.sin(th)
     return np.stack([c * x - s * y + tx, s * x + c * y + ty], axis=1)
+
+
+def _near(a: QPointF, b: QPointF, slop: float) -> bool:
+    return math.hypot(a.x() - b.x(), a.y() - b.y()) <= slop
+
+
+def _norm_roi(roi) -> tuple | None:
+    """Any accepted region spelling -> (x, y, w, h, angle_deg), or None.
+
+    Four values means upright, which is what every build before 0.17 wrote and
+    what drawing a fresh region still produces. Widening the tuple rather than
+    introducing a second field keeps one region concept in the settings file,
+    the config file, the run metadata and the preview.
+    """
+    if not roi:
+        return None
+    v = [float(t) for t in roi]
+    if len(v) < 4 or v[2] < 1 or v[3] < 1:
+        return None
+    ang = v[4] if len(v) > 4 else 0.0
+    return (int(round(v[0])), int(round(v[1])), int(round(v[2])), int(round(v[3])),
+            round(float(ang), 2))
 
 
 def local_to_image(pose, lx: float, ly: float) -> tuple[float, float]:
@@ -91,12 +131,17 @@ class PreviewView(QLabel):
         self._grab_offset = (0.0, 0.0)
         self._color = QColor("#FF5470")
 
-        # Region of interest, in *image* pixels. Kept in image space rather than
-        # widget space for the same reason the pose is: the widget resizes and
-        # the decode scale changes, and neither should move the region.
-        self.roi: tuple[int, int, int, int] | None = None
+        # Region of interest, in *image* pixels, as (x, y, w, h, angle_deg).
+        # Kept in image space rather than widget space for the same reason the
+        # pose is: the widget resizes and the decode scale changes, and neither
+        # should move the region. x, y are the corner of the *unrotated* box;
+        # the angle turns it about its own centre.
+        self.roi: tuple | None = None
         self.roi_edit = False
         self._roi_anchor = None
+        self._roi_drag: str | None = None
+        self._roi_grab = (0.0, 0.0)     # cursor offset from centre, at grab time
+        self._roi_start: tuple | None = None
 
     # ---- content ---------------------------------------------------------
 
@@ -104,11 +149,59 @@ class PreviewView(QLabel):
         self._color = QColor(hex_color)
 
     def set_roi(self, roi, edit: bool | None = None) -> None:
-        self.roi = tuple(int(v) for v in roi) if roi else None
+        self.roi = _norm_roi(roi)
         if edit is not None:
             self.roi_edit = bool(edit)
-        self.setCursor(Qt.CrossCursor if self.roi_edit else Qt.ArrowCursor)
+        self.setCursor(Qt.CrossCursor if (self.roi_edit and self.roi is None)
+                       else Qt.ArrowCursor)
         self.update()
+
+    # ---- region geometry -------------------------------------------------
+
+    def _roi_center(self) -> tuple[float, float, float, float, float]:
+        """(cx, cy, half-width, half-height, angle in radians) in image px."""
+        x, y, w, h, a = self.roi
+        return x + w / 2.0, y + h / 2.0, w / 2.0, h / 2.0, math.radians(a)
+
+    def _roi_point(self, u: float, v: float) -> QPointF:
+        """A point on the region, in widget pixels. (u, v) are in [-1, 1]."""
+        cx, cy, hw, hh, r = self._roi_center()
+        dx, dy = u * hw, v * hh
+        c, s = math.cos(r), math.sin(r)
+        return self._to_widget(cx + c * dx - s * dy, cy + s * dx + c * dy)
+
+    def _roi_polygon(self) -> QPolygonF:
+        return QPolygonF([self._roi_point(u, v)
+                          for u, v in ((-1, -1), (1, -1), (1, 1), (-1, 1))])
+
+    def _roi_rot_grip(self) -> QPointF:
+        """Where the rotation grip sits: out along the region's own -y axis.
+
+        Placed in *widget* pixels beyond the top edge rather than in image
+        pixels, so it stays a comfortable distance from the edge whatever the
+        zoom -- an image-space offset vanishes into the border on a small
+        region and floats absurdly far away on a large one.
+        """
+        top = self._roi_point(0, -1)
+        cen = self._roi_point(0, 0)
+        vx, vy = top.x() - cen.x(), top.y() - cen.y()
+        n = math.hypot(vx, vy)
+        if n < 1e-6:
+            return QPointF(top.x(), top.y() - ROI_ROT_ARM)
+        return QPointF(top.x() + vx / n * ROI_ROT_ARM, top.y() + vy / n * ROI_ROT_ARM)
+
+    def _roi_hit(self, pos: QPointF) -> str | None:
+        """Which part of the region is under the cursor, if any."""
+        if self.roi is None:
+            return None
+        if _near(self._roi_rot_grip(), pos, GRAB_SLOP):
+            return "roi_rot"
+        for name, (u, v) in ROI_HANDLES.items():
+            if _near(self._roi_point(u, v), pos, GRAB_SLOP):
+                return name
+        if self._roi_polygon().containsPoint(pos, Qt.OddEvenFill):
+            return "roi_body"
+        return None
 
     def set_frame(self, pixmap: QPixmap | None, image_size: tuple[int, int]) -> None:
         self._frame = pixmap
@@ -182,22 +275,35 @@ class PreviewView(QLabel):
         # excluded and why -- a region that has clipped the robot is obvious at
         # a glance instead of looking like a tracking failure.
         if self.roi is not None:
-            rx, ry, rw, rh = self.roi
-            tl = self._to_widget(rx, ry)
-            br = self._to_widget(rx + rw, ry + rh)
-            rect = QRectF(tl, br)
-            shade = QColor(0, 0, 0, 110)
+            poly = self._roi_polygon()
             full = QRectF(ox, oy, w * z, h * z)
-            p.setPen(Qt.NoPen); p.setBrush(shade)
-            p.drawRect(QRectF(full.left(), full.top(), full.width(), rect.top() - full.top()))
-            p.drawRect(QRectF(full.left(), rect.bottom(), full.width(), full.bottom() - rect.bottom()))
-            p.drawRect(QRectF(full.left(), rect.top(), rect.left() - full.left(), rect.height()))
-            p.drawRect(QRectF(rect.right(), rect.top(), full.right() - rect.right(), rect.height()))
-            pen = QPen(self._color, 2.0, Qt.DashLine)
-            p.setPen(pen); p.setBrush(Qt.NoBrush)
-            p.drawRect(rect)
-        elif self.roi_edit and self._roi_anchor is not None:
-            pass
+            # Subtracting the polygon from the frame handles the rotated case in
+            # one fill, where the old four-rectangle border only ever worked for
+            # an upright box.
+            outside = QPainterPath()
+            outside.addRect(full)
+            inside = QPainterPath()
+            inside.addPolygon(poly)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 110))
+            p.drawPath(outside.subtracted(inside))
+
+            p.setPen(QPen(self._color, 2.0, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawPolygon(poly)
+
+            if self.roi_edit:
+                grip = self._roi_rot_grip()
+                top = self._roi_point(0, -1)
+                p.setPen(QPen(self._color, 1.4))
+                p.drawLine(top, grip)
+                p.setBrush(self._color)
+                p.setPen(QPen(QColor("#0A0E16"), 1.2))
+                p.drawEllipse(grip, HANDLE_R - 1.0, HANDLE_R - 1.0)
+                for u, v in ROI_HANDLES.values():
+                    c = self._roi_point(u, v)
+                    p.drawRect(QRectF(c.x() - ROI_HANDLE, c.y() - ROI_HANDLE,
+                                      2 * ROI_HANDLE, 2 * ROI_HANDLE))
 
         if self.pose is None or self.template is None:
             return
@@ -251,6 +357,20 @@ class PreviewView(QLabel):
 
     def mousePressEvent(self, ev):
         if self.roi_edit and ev.button() == Qt.LeftButton and self._frame is not None:
+            # Grabbing an existing region edits it; clicking anywhere else
+            # starts a new one. That ordering matters -- the alternative,
+            # requiring a mode switch between "draw" and "adjust", means every
+            # small correction costs two clicks somewhere else in the window.
+            hit = self._roi_hit(ev.position())
+            if hit is not None:
+                self._roi_drag = hit
+                self._roi_start = self.roi
+                cx, cy, _, _, _ = self._roi_center()
+                ix, iy = self._to_image(ev.position())
+                self._roi_grab = (cx - ix, cy - iy)
+                self.setCursor(QCursor(ROI_CURSORS.get(hit, Qt.CrossCursor)))
+                ev.accept()
+                return
             self._roi_anchor = self._to_image(ev.position())
             self.roi = None
             self.update()
@@ -272,11 +392,19 @@ class PreviewView(QLabel):
 
     def mouseMoveEvent(self, ev):
         pos = ev.position()
+        if self._roi_drag is not None:
+            self._drag_roi(pos, ev.modifiers())
+            self.update()
+            ev.accept()
+            return
         if self.roi_edit and self._roi_anchor is not None:
             self.roi = self._rect_from(self._roi_anchor, self._to_image(pos))
             self.update()
             ev.accept()
             return
+        if self.roi_edit and self.roi is not None and self._drag is None:
+            hit = self._roi_hit(pos)
+            self.setCursor(QCursor(ROI_CURSORS.get(hit, Qt.CrossCursor)))
         if self._drag is None:
             if self.editable and self.pose is not None:
                 hit = self._hit(pos)
@@ -312,17 +440,68 @@ class PreviewView(QLabel):
         self.update()
         ev.accept()
 
+    def _drag_roi(self, pos: QPointF, mods) -> None:
+        """Move, resize or rotate the region, in the region's own frame."""
+        if self._roi_start is None:
+            return
+        x, y, w, h, a = self._roi_start
+        cx, cy = x + w / 2.0, y + h / 2.0
+        hw, hh = w / 2.0, h / 2.0
+        r = math.radians(a)
+        c, s = math.cos(r), math.sin(r)
+        ix, iy = self._to_image(pos)
+
+        if self._roi_drag == "roi_body":
+            cx, cy = ix + self._roi_grab[0], iy + self._roi_grab[1]
+
+        elif self._roi_drag == "roi_rot":
+            # The grip starts on the region's -y axis, so the pointer angle
+            # measured from there is the new rotation directly.
+            ang = math.degrees(math.atan2(iy - cy, ix - cx)) + 90.0
+            if mods & Qt.ShiftModifier:
+                ang = round(ang / 15.0) * 15.0
+            a = round((ang + 180.0) % 360.0 - 180.0, 2)
+
+        else:
+            u, v = ROI_HANDLES[self._roi_drag]
+            # Cursor in the region's own axes, relative to its centre.
+            dx, dy = ix - cx, iy - cy
+            lx = c * dx + s * dy
+            ly = -s * dx + c * dy
+            mcx = mcy = 0.0
+            if u:
+                opp = -u * hw                      # the edge that stays put
+                hw = max(abs(lx - opp) / 2.0, ROI_MIN_PX / 2.0)
+                mcx = (lx + opp) / 2.0
+            if v:
+                opp = -v * hh
+                hh = max(abs(ly - opp) / 2.0, ROI_MIN_PX / 2.0)
+                mcy = (ly + opp) / 2.0
+            # The centre moves in image space by the local shift, rotated back.
+            cx += c * mcx - s * mcy
+            cy += s * mcx + c * mcy
+            w, h = 2 * hw, 2 * hh
+
+        self.roi = _norm_roi((cx - w / 2.0, cy - h / 2.0, w, h, a))
+
     def _rect_from(self, a, b):
         w_img, h_img = self._image_size
         x0, y0 = sorted((a[0], b[0])), sorted((a[1], b[1]))
         x, X = int(max(0, x0[0])), int(min(w_img, x0[1]))
         y, Y = int(max(0, y0[0])), int(min(h_img, y0[1]))
         # A region smaller than this is a mis-click, not an intent.
-        if X - x < 16 or Y - y < 16:
+        if X - x < ROI_MIN_PX or Y - y < ROI_MIN_PX:
             return None
-        return (x, y, X - x, Y - y)
+        return (x, y, X - x, Y - y, 0.0)
 
     def mouseReleaseEvent(self, ev):
+        if self._roi_drag is not None:
+            self._roi_drag = None
+            self._roi_start = None
+            self.setCursor(Qt.CrossCursor)
+            self.roiChanged.emit(self.roi)
+            ev.accept()
+            return
         if self.roi_edit and self._roi_anchor is not None:
             self._roi_anchor = None
             self.roiChanged.emit(self.roi)

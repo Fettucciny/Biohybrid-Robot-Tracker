@@ -14,7 +14,9 @@ job (see register.py), not segmentation's.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -37,7 +39,8 @@ class SegmentConfig:
     # Region of interest, in *full-resolution* image pixels, or None for the
     # whole frame. Stored at full resolution so one region stays valid when the
     # decode scale changes, exactly like a manual placement.
-    roi: tuple[int, int, int, int] | None = None   # x, y, w, h
+    # (x, y, w, h) upright, or (x, y, w, h, angle_deg) rotated about its centre.
+    roi: tuple | None = None
     gap_factor: float = 1.0         # occlusion gap tolerated, in body lengths
 
     # --- how the robot is told apart from everything else ------------------
@@ -76,24 +79,81 @@ class SegmentConfig:
 # a median to see through it.
 # ---------------------------------------------------------------------------
 
-def roi_rect(cfg: "SegmentConfig", width: int, height: int,
-             scale: float = 1.0) -> tuple[int, int, int, int] | None:
-    """The configured region in *this* frame's pixels, clipped, or None."""
-    if not cfg.roi:
+def roi_corners(roi, scale: float = 1.0) -> np.ndarray | None:
+    """The region's four corners in image pixels, in order, or None.
+
+    Accepts both the four-value upright form and the five-value rotated one, so
+    a settings file or a ``.rtcfg`` written by any build still loads. The angle
+    is degrees, clockwise on screen, about the region's own centre.
+    """
+    if not roi:
         return None
     try:
-        x, y, w, h = (int(round(v * scale)) for v in cfg.roi)
+        vals = [float(v) for v in roi]
     except (TypeError, ValueError):
         return None
-    x0, y0 = max(0, x), max(0, y)
-    x1, y1 = min(width, x + w), min(height, y + h)
+    if len(vals) < 4:
+        return None
+    x, y, w, h = (v * scale for v in vals[:4])
+    ang = math.radians(vals[4]) if len(vals) > 4 else 0.0
+    cx, cy = x + w / 2.0, y + h / 2.0
+    c, s = math.cos(ang), math.sin(ang)
+    out = []
+    for dx, dy in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
+        out.append((cx + c * dx - s * dy, cy + s * dx + c * dy))
+    return np.array(out, np.float32)
+
+
+def roi_rect(cfg: "SegmentConfig", width: int, height: int,
+             scale: float = 1.0) -> tuple[int, int, int, int] | None:
+    """The region's axis-aligned bounding box in *this* frame's pixels, clipped.
+
+    This is the box the region *fits inside*, not the region: it is what crops
+    are taken from and what the color estimator samples. The rotated shape
+    itself is applied by :func:`apply_roi`, so a rotated region still excludes
+    its corners even though the crop around it is upright.
+    """
+    pts = roi_corners(getattr(cfg, "roi", None), scale)
+    if pts is None:
+        return None
+    x0, y0 = max(0, int(np.floor(pts[:, 0].min()))), max(0, int(np.floor(pts[:, 1].min())))
+    x1 = min(width, int(np.ceil(pts[:, 0].max())))
+    y1 = min(height, int(np.ceil(pts[:, 1].max())))
     if x1 - x0 < 8 or y1 - y0 < 8:
         return None
     return x0, y0, x1 - x0, y1 - y0
 
 
-def apply_roi(mask: np.ndarray, rect) -> np.ndarray:
-    """Zero everything outside ``rect``.
+def roi_keep_mask(cfg: "SegmentConfig", width: int, height: int,
+                  scale: float = 1.0) -> np.ndarray | None:
+    """uint8 {0,1} of the region's own shape, or None for the whole frame.
+
+    Upright regions skip the polygon fill and return None with the rectangle
+    handled by slicing instead, because that is both the common case and the
+    cheap one.
+    """
+    roi = getattr(cfg, "roi", None)
+    if not roi or len(roi) < 5 or abs(float(roi[4])) < 1e-6:
+        return None
+    return _roi_keep_cached(tuple(float(v) for v in roi), int(width), int(height),
+                            float(scale))
+
+
+@lru_cache(maxsize=4)
+def _roi_keep_cached(roi: tuple, width: int, height: int, scale: float) -> np.ndarray | None:
+    # The region does not change during a run, so filling the polygon every
+    # frame is 2 ms a frame spent redrawing the same picture.
+    pts = roi_corners(roi, scale)
+    if pts is None:
+        return None
+    keep = np.zeros((height, width), np.uint8)
+    cv2.fillConvexPoly(keep, np.round(pts).astype(np.int32), 1)
+    keep.flags.writeable = False
+    return keep
+
+
+def apply_roi(mask: np.ndarray, rect, keep: np.ndarray | None = None) -> np.ndarray:
+    """Zero everything outside the region.
 
     Masking rather than cropping, deliberately. A crop would be marginally
     cheaper and would force every coordinate downstream -- the fit, the
@@ -102,11 +162,16 @@ def apply_roi(mask: np.ndarray, rect) -> np.ndarray:
     until the numbers are already in a figure. Zeroing keeps one coordinate
     system for the whole pipeline.
     """
-    if rect is None:
+    if rect is None and keep is None:
         return mask
-    x, y, w, h = rect
     out = np.zeros_like(mask)
+    if rect is None:
+        x, y, w, h = 0, 0, mask.shape[1], mask.shape[0]
+    else:
+        x, y, w, h = rect
     out[y:y + h, x:x + w] = mask[y:y + h, x:x + w]
+    if keep is not None:
+        out *= keep.astype(out.dtype, copy=False)
     return out
 
 
@@ -154,10 +219,35 @@ def estimate_colors(frames_bgr, bins: int = 64
             float(np.hypot(*(tgt - ref))))
 
 
+@lru_cache(maxsize=8)
+def _ab_distance_lut(ba: float, bb: float) -> np.ndarray:
+    """256x256 table of distance from (ba, bb), indexed by a* then b*.
+
+    OpenCV's 8-bit Lab packs a* and b* into whole bytes, so the distance from a
+    *fixed* background color takes only 65 536 distinct values and can be
+    tabulated once per clip. Cached on the color itself rather than stored on
+    the segmenter so the preview, the run and the appearance tracker all share
+    one table instead of building three.
+    """
+    g = np.arange(256, dtype=np.float32)
+    da = g - float(ba)
+    db = g - float(bb)
+    return np.sqrt(da[:, None] ** 2 + db[None, :] ** 2).astype(np.float32)
+
+
 def color_distance(frame_bgr: np.ndarray, bg_ab) -> np.ndarray:
-    """Per-pixel distance from the background color, in a*b* units."""
-    d = chroma(frame_bgr) - np.asarray(bg_ab, np.float32)
-    return np.sqrt((d * d).sum(-1))
+    """Per-pixel distance from the background color, in a*b* units.
+
+    Table lookup rather than arithmetic, and the difference is not marginal.
+    The obvious ``sqrt(((ab - bg) ** 2).sum(-1))`` allocates four 16 MB float32
+    temporaries per 1080p frame and spends its whole time moving them through
+    memory: measured at 70 ms a frame, against 18 ms for the lookup, for a
+    bit-identical result. This function runs at least once per frame of every
+    run, so that difference was most of the clip's analysis time.
+    """
+    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+    lut = _ab_distance_lut(float(bg_ab[0]), float(bg_ab[1]))
+    return lut[lab[..., 1], lab[..., 2]]
 
 
 def segment_color(frame_bgr: np.ndarray, cfg: SegmentConfig,
@@ -171,14 +261,47 @@ def segment_color(frame_bgr: np.ndarray, cfg: SegmentConfig,
     the body in half -- measured at 62-67% of the mask in the largest fragment,
     against 92-93% for the fractional cut.
     """
+    m, thr, _ = segment_color_d(frame_bgr, cfg, bg_ab, separation, threshold)
+    return m, thr
+
+
+def segment_color_d(frame_bgr: np.ndarray, cfg: SegmentConfig,
+                    bg_ab, separation: float,
+                    threshold: float | None = None
+                    ) -> tuple[np.ndarray, float, np.ndarray]:
+    """As :func:`segment_color`, and also returns the color-distance image.
+
+    The distance image is not a debugging extra: it is the continuous signal the
+    shape fitter matches interior edges against, and it is what the b* view
+    shows. Computing it once and handing it out is worth a slightly awkward
+    signature -- the pipeline used to derive the mask here and then recompute
+    the identical distance image a few lines later, which at 1080p was 70 ms of
+    the frame's budget spent producing an array it already had.
+
+    Work is confined to the region's bounding box when one is set. Everything
+    outside is zero by construction and the morphology is re-clipped afterwards,
+    so cropping cannot leak a value across the boundary; it only avoids
+    computing pixels whose answer is already known.
+    """
     thr = float(threshold) if threshold is not None else cfg.color_frac * separation
-    d = color_distance(frame_bgr, bg_ab)
+    h_img, w_img = frame_bgr.shape[:2]
+    rect = roi_rect(cfg, w_img, h_img)
+    keep = roi_keep_mask(cfg, w_img, h_img)
+
+    if rect is not None:
+        x, y, w, h = rect
+        d = np.zeros((h_img, w_img), np.float32)
+        d[y:y + h, x:x + w] = color_distance(
+            np.ascontiguousarray(frame_bgr[y:y + h, x:x + w]), bg_ab)
+    else:
+        d = color_distance(frame_bgr, bg_ab)
+
     m = (d > thr).astype(np.uint8)
     if cfg.open_px > 1:
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((cfg.open_px,) * 2, np.uint8))
     if cfg.close_px > 1:
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((cfg.close_px,) * 2, np.uint8))
-    return apply_roi(m, roi_rect(cfg, m.shape[1], m.shape[0])), thr
+    return apply_roi(m, rect, keep), thr, d
 
 
 def build_background(reader: FrameReader, cfg: SegmentConfig,
@@ -210,6 +333,10 @@ class Mask:
     area_px: float
     contour: np.ndarray | None   # (N,2) float32 outline, largest component
     frame: np.ndarray | None = None   # the decoded frame, for live overlays
+    # The continuous image the mask was cut from -- color distance in color
+    # mode, nothing in luma mode, where the frame itself already is it. Carried
+    # rather than recomputed downstream; see segment_color_d.
+    signal: np.ndarray | None = None
 
 
 def segment_frame(frame: torch.Tensor, background: torch.Tensor,
@@ -223,11 +350,14 @@ def segment_frame(frame: torch.Tensor, background: torch.Tensor,
     if cfg.close_px > 1:
         m = closing(m, cfg.close_px)
     rect = roi_rect(cfg, m.shape[-1], m.shape[-2])
+    shape = roi_keep_mask(cfg, m.shape[-1], m.shape[-2])
     if rect is not None:
         x, y, w, h = rect
         keep = torch.zeros_like(m)
         keep[..., y:y + h, x:x + w] = 1.0
         m = m * keep
+    if shape is not None:
+        m = m * torch.from_numpy(np.ascontiguousarray(shape)).to(m.device, m.dtype)
     return m, thr
 
 
@@ -422,19 +552,22 @@ class Segmenter:
 
     def _mask_of(self, frame: np.ndarray) -> np.ndarray:
         """Raw mask for one frame, in whichever mode is active."""
+        return self._mask_and_signal(frame)[0]
+
+    def _mask_and_signal(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
         if self.color:
-            m, thr = segment_color(frame, self.cfg, self.model.bg_ab,
-                                    self.model.separation, self._thr)
+            m, thr, d = segment_color_d(frame, self.cfg, self.model.bg_ab,
+                                        self.model.separation, self._thr)
             self._last_thr = thr
-            return m
+            return m, d
         ft = torch.from_numpy(frame.copy()).to(self.dev.torch_device).float()
         m, thr = segment_frame(ft, self.background, self.cfg, self._thr)
         self._last_thr = thr
-        return m.to(torch.uint8).cpu().numpy()
+        return m.to(torch.uint8).cpu().numpy(), None
 
     def __iter__(self):
         for i, t, frame in self.source:
-            mask_np = self._mask_of(frame)
+            mask_np, signal = self._mask_and_signal(frame)
             # Freeze the threshold after a short burn-in. A per-frame Otsu drifts
             # when the robot is occluded (less foreground changes the histogram),
             # which would make the measured size depend on the occlusion. The
@@ -451,4 +584,4 @@ class Segmenter:
                 # available estimate of true body size, and it only grows.
                 ext = float(max(np.ptp(contour[:, 0]), np.ptp(contour[:, 1])))
                 self._extent_px = max(self._extent_px, ext)
-            yield Mask(i, t, mask_np, area, contour, frame)
+            yield Mask(i, t, mask_np, area, contour, frame, signal)

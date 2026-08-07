@@ -285,6 +285,73 @@ HELP: dict[str, dict] = {
         ],
     },
 
+    "width_weight": {
+        "title": "Width hold",
+        "short": "How hard the fitted width is held to the drawing's width.",
+        "what": "The robot's width and its length are not the same kind of quantity. "
+                "Width is set by the mould: it is whatever the drawing says, it takes "
+                "no part in contraction, and a frame where the fitted width departs "
+                "from the drawing is a frame where segmentation went wrong — not one "
+                "where the robot got wider. Length is the opposite; it is the thing "
+                "being measured. This weight applies a quadratic penalty pulling the "
+                "width back to nominal, in the same units as the outline-matching "
+                "cost, which saturates at 1. So 2.0 means one tolerance of width "
+                "error costs twice as much as a completely wrong outline.",
+        "range": "0 (off) – 20",
+        "default": "2.0",
+        "guidance": [
+            "Raise it if the fitted width in the CSV wanders while the robot "
+            "visibly does not.",
+            "Lower it, or turn it off, if you are tracking something whose width "
+            "genuinely changes — a bending sheet rather than a walker.",
+            "It is deliberately weak near nominal and strong far from it: at 1% "
+            "off it barely acts, at 10% off it dominates everything else.",
+        ],
+    },
+    "width_tol": {
+        "title": "Width tolerance",
+        "short": "The width error at which the hold reaches full strength.",
+        "what": "The sigma of the width penalty, as a percentage of the drawing's "
+                "width. Error inside this costs almost nothing; error well outside "
+                "it costs the square. A separate hard clamp stops the width leaving "
+                "±15% of nominal whatever this and the weight are set to.",
+        "range": "0.5 – 30 %",
+        "default": "4 %",
+        "guidance": [
+            "4% is about the frame-to-frame width noise of a clean color key at "
+            "1080p, so this leaves ordinary noise alone and catches real failures.",
+            "Widen it if the drawing's width is only approximately right — a "
+            "penalty centred on the wrong value is worse than no penalty at all.",
+        ],
+    },
+    "length_overshoot": {
+        "title": "Length overshoot",
+        "short": "How far the fitted length may exceed the drawing's, in pixels.",
+        "what": "Relaxed length is bounded above by the drawing: a hydrogel robot "
+                "contracts from its moulded length, it does not grow past it. An "
+                "outline that has stretched beyond the drawing has latched onto "
+                "something that is not the robot — a tether, a shadow, a second "
+                "body keying in — and that failure is otherwise invisible, because "
+                "an over-long fit still puts most of its points on real edges and "
+                "still reports high confidence. This is the noise allowance on that "
+                "ceiling.\n\n"
+                "The ceiling itself is the hand-placed length if you placed the "
+                "outline, and otherwise the 90th percentile of the first 45 "
+                "confident fits — the clip's own answer to how long this robot is "
+                "when relaxed.",
+        "range": "0 – 60 px",
+        "default": "3 px",
+        "guidance": [
+            "Not zero: a real mask edge moves about a pixel frame to frame, and a "
+            "hard equality would clip genuine relaxation to whichever frame "
+            "happened to segment tightest.",
+            "Raise it if relaxed length in the CSV sits pinned at one value for "
+            "long stretches — that means the ceiling is binding on real data.",
+            "Raise it a lot, or place the outline by hand, if the clip never shows "
+            "the robot fully relaxed: the learned ceiling is then too low.",
+        ],
+    },
+
     # ------------------------------------------------------------- analysis
     "smoothing": {
         "title": "Smoothing window",

@@ -571,6 +571,35 @@ path is best-effort and silent on failure; a machine with no audio device must
 not take a run down with it. Turn it off by unsetting **sound** in the settings
 file, or set `ROBOTRACK_NO_SOUND=1`.
 
+### Simple and advanced, and a sidebar you can fold up
+
+The left column has forty-odd controls and a run needs about eight of them. Two
+mechanisms narrow it, deliberately kept separate because they answer different
+questions.
+
+**Simple / advanced**, the first button in the header, is about the controls
+themselves. A control is marked advanced where it is built if it is something
+you would set once while working out a protocol and never touch again while
+running one: the whole Shape fitting card, the morphology dials, the occlusion
+gap, the background frame count, the maximum bridged gap, the appearance lock.
+Simple mode hides all of them at once, and a card with nothing left disappears
+rather than sitting there as an empty titled box. The setting is remembered — a
+choice to work in simple mode is a choice, not a session default.
+
+**Collapsing** is about the individual section. Click any card's title to fold
+it, and which ones you folded is remembered between launches, so a section you
+never use can stay shut permanently. Two start closed on a fresh install: Shape
+fitting and Output.
+
+The order is the order work happens in: **Configuration**, then Input, Target
+placement, Segmentation, Shape fitting, Force, Analysis, Output. Configuration
+is pinned at the top and cannot be collapsed, because it is the only card that
+is about the program rather than about the experiment and it should be reachable
+whatever else is folded away. It is also the most compact — three short buttons
+on one row, and the paragraph that used to explain them is a tooltip, since it
+was three lines of prose explaining two buttons whose labels already said what
+they did.
+
 ### Dark and light
 
 The button in the header switches between them and the choice is remembered. The
@@ -683,6 +712,78 @@ placement to seed the pose, and letting the template fit carry the shape. And
 the real fix is upstream: even illumination, and a medium that is not blown out
 at the frame edges, restore the separation that makes all of this automatic.
 
+### The region can be turned, and adjusted after you draw it
+
+A dish is round, a well plate sits on a stage that was never quite square to the
+camera, and a robot that walks does not walk parallel to the image axes. An
+upright rectangle around any of those either clips the robot or admits the rim
+you were trying to exclude.
+
+Drag on the frame to draw the region as before. It then keeps eight square
+handles on its edges and corners, and a round grip above it:
+
+| | |
+|---|---|
+| drag a corner or an edge | resize, with the opposite edge pinned |
+| drag the round grip | rotate about the centre (hold **Shift** for 15° steps) |
+| drag inside it | move it |
+
+Rotation is real, not cosmetic. The corners outside the turned rectangle are
+excluded from the mask *and* from the color estimate, which is the half that
+matters — the estimator takes the densest hue as the medium and the farthest
+populated one as the robot, so a bright rim left inside the box gets chosen as
+the robot however carefully the box was drawn around it.
+
+Regions are stored as `x, y, w, h, angle` in full-resolution pixels. A settings
+or `.rtcfg` file written by an earlier build has four values and still loads; it
+simply means an angle of zero.
+
+### Width is a constant, length is the measurement
+
+These two are not the same kind of quantity, and the fit used to treat them
+alike. The robot's width is set by the mould: it is what the drawing says, it
+takes no part in contraction, and a frame where the fitted width departs from
+the drawing is a frame where segmentation went wrong — not one where the robot
+got wider. Length is the opposite. It is the thing being measured.
+
+So the fit is now anisotropic. Width is held to the drawing by a quadratic
+penalty and a hard ±15% clamp. Length is left free downward and capped upward:
+it may not exceed the drawing's relaxed length by more than a few pixels, since
+an outline that has stretched past it has certainly latched onto a tether, a
+shadow or a second body — and that failure is otherwise invisible, because an
+over-long fit still puts most of its points on real edges and still reports high
+confidence.
+
+Both references are *measured*, not assumed. A hand placement states them
+outright. Otherwise the first 45 confident frames run unconstrained, and the
+width reference is their median while the length ceiling is their 90th
+percentile — the clip's own answer to how wide and how long this robot is.
+Anchoring to frame zero's automatic seed was tried and rejected: that is one
+moment estimate on one mask, and locking its bias in moved the derived
+calibration by a percent.
+
+Measured on the synthetic clip, over the frames after the learning window:
+
+| | before | after |
+|---|---|---|
+| fitted width, standard deviation | 3.20 px | **0.18 px** |
+| reported width CV | 0.050 | 0.031 |
+| length vs. ground truth, r | 0.9955 | 0.9943 |
+| calibration, px/mm (truth 10.0) | 10.62 | **10.58** |
+
+Length accuracy is unchanged, which is the point — the constraint is on the axis
+that should not move. Note that the synthetic robot is modelled as
+*incompressible*, so its width genuinely breathes by ±8% there and the hold is
+fighting real physics; that is why the length correlation moves in the fourth
+decimal rather than improving. On a moulded hydrogel walker it is not fighting
+anything. If you are tracking something whose width does change — a bending
+sheet rather than a walker — set **Width hold** to off.
+
+Three settings, all under Shape fitting in advanced mode: **Width hold** (the
+weight, 0 turns it off), **Width tolerance** (the error at which it reaches full
+strength, 4%) and **Length overshoot** (the noise allowance on the ceiling,
+3 px).
+
 ### Fragment grouping needs an envelope
 
 Regrouping fragments across an occlusion gap by proximity alone was tuned for a
@@ -706,7 +807,54 @@ It judges outlines by how well they fit the mask, so run it once the mask looks
 right. A best score below about 0.35 is reported as a warning, because that is a
 segmentation problem wearing an outline problem's clothes.
 
-### Speed
+### Analysis throughput
+
+Where the time went, profiled at 1080p rather than guessed at. Three findings,
+each with a fix, and none of them in the place you would look first:
+
+**The single most expensive operation in the program ran twice per frame.**
+The color-distance surface is what the mask is cut from *and* what the shape fit
+matches interior edges against. The segmenter built it, threw it away, and the
+pipeline rebuilt the identical array a few lines later. The segmenter now hands
+it out. That is one whole computation removed from every frame.
+
+**And it was computed the slow way.** `sqrt(((ab - bg) ** 2).sum(-1))` reads
+naturally and allocates four 16 MB float32 temporaries per frame, spending its
+whole time moving them through memory. OpenCV's 8-bit Lab packs a\* and b\* into
+whole bytes, so distance from a fixed background colour takes only 65 536
+distinct values and can be tabulated once per clip. The result is bit-identical
+and the lookup is measured at 18 ms against 70 ms.
+
+**The per-frame image work was done on the whole frame.** The distance
+transform, the blurred mask and the interior edge map are all whole-frame OpenCV
+operations, and together at 1080p they cost more than the optimizer they feed.
+None of them is needed more than a body length from where the robot was on the
+previous frame. They now run on a window around the previous pose, which is
+about ten times cheaper and identical inside the window. Cold frames — the first
+one, and any recovery after a lost stretch — still use the whole frame, because
+a lost tracker genuinely may be anywhere.
+
+Alongside those, the multi-start search drops from 64 restarts to 12 once the
+tracker is locked on. The search exists to *find* the robot from a cold seed; on
+a warm frame every hypothesis starts a fraction of a pixel from the answer.
+
+End to end on the synthetic clip, on a CPU, with the fitted length unchanged
+(r = 0.997 against the previous build):
+
+| | before | after |
+|---|---|---|
+| whole run, 120 frames | 55.0 s | **38.0 s** |
+| shape fitting | 35.9 s | **17.2 s** |
+| throughput | 2.2 fps | **3.2 fps** |
+| `color_distance`, per frame | 70 ms | **18 ms** |
+
+The run summary now prints throughput in frames per second alongside the
+per-stage breakdown, so the next time a clip feels slow the answer is in the log
+rather than in a guess. If `decode+segment` dominates, the bottleneck is I/O or
+the frame size — try decode scale 0.5. If `fit` dominates and the device chip in
+the header says CPU only, that is the whole story.
+
+### Interface speed
 
 | | before | after |
 |---|---|---|
