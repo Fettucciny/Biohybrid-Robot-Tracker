@@ -41,14 +41,33 @@ def signed_distance_grid(pts: np.ndarray, res: int = 192, margin: float = 0.45):
     """
     import cv2
 
+    pts = np.asarray(pts, np.float64)
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    if len(pts) < 3:
+        raise ValueError("this outline has fewer than three usable points")
+
     lo = pts.min(axis=0)
     hi = pts.max(axis=0)
-    span = (hi - lo).max() * (1.0 + 2 * margin)
+    span = float((hi - lo).max()) * (1.0 + 2 * margin)
+    # A degenerate loop -- a zero-radius circle, a zero-length line, a run of
+    # identical vertices -- makes span 0, and everything below divides by it.
+    # The resulting inf becomes INT_MIN under astype(int32), which numpy does
+    # not define and which cv2.fillPoly does not survive: the process dies with
+    # no Python traceback and no dialog, which is exactly what "it sometimes
+    # crashes when opening a DXF" looked like. Refusing here turns a crash into
+    # a sentence.
+    if not np.isfinite(span) or span <= 1e-9:
+        raise ValueError("this outline has no extent — every point is in the "
+                         "same place, so there is no shape to fit")
     center = (lo + hi) / 2.0
     origin = center - span / 2.0
     spacing = span / (res - 1)
 
-    grid_pts = ((pts - origin) / spacing).astype(np.int32)
+    # Clipped as well as guarded, because fillPoly indexes memory from these
+    # numbers: a coordinate outside the raster is not a wrong picture, it is a
+    # crash, and the guard above only covers the one cause seen so far.
+    grid = np.rint((pts - origin) / spacing)
+    grid_pts = np.clip(grid, -res, 2 * res).astype(np.int32)
     filled = np.zeros((res, res), np.uint8)
     cv2.fillPoly(filled, [grid_pts], 1)
     if filled.sum() == 0:
@@ -372,6 +391,20 @@ def load_dxf(path: str | Path, n_points: int = 400, flatten_mm: float = 0.05,
 
     pts = _resample_closed(outer, n_points)
     pts -= pts.mean(axis=0)
+
+    # Validate before anything downstream touches it. Everything after this --
+    # the SVD, the normals, the distance grid, the fitter's scale limits --
+    # divides by some property of this outline, and a drawing can perfectly
+    # legally contain a zero-radius circle or a degenerate loop. Naming the
+    # problem here is the difference between a message and a silent process
+    # death several calls later.
+    if not np.isfinite(pts).all():
+        raise ValueError("this outline contains coordinates that are not "
+                         "numbers — the drawing is malformed")
+    w_mm, l_mm = float(np.ptp(pts[:, 0])), float(np.ptp(pts[:, 1]))
+    if max(w_mm, l_mm) <= 1e-9:
+        raise ValueError("this outline has no extent. Pick a different outline "
+                         "under Outline, or check the drawing's units.")
 
     # Rotate so the long axis is local +y. This makes the fitted scale factors
     # directly interpretable as (width, length) rather than an arbitrary pair.

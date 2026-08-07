@@ -59,6 +59,11 @@ ROI_CURSORS = {
     "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor,
     "roi_rot": Qt.CrossCursor, "roi_body": Qt.SizeAllCursor,
 }
+# Every grabbable thing on the picture, region and outline alike, so hovering
+# answers "what would a click here do" in one lookup.
+HOVER_CURSORS = dict(ROI_CURSORS)
+HOVER_CURSORS.update({"move": Qt.OpenHandCursor, "length": Qt.CrossCursor,
+                      "width": Qt.CrossCursor, "roi_new": Qt.CrossCursor})
 
 
 def transform_points(pts: np.ndarray, pose) -> np.ndarray:
@@ -140,6 +145,8 @@ class PreviewView(QLabel):
         self.roi_edit = False
         self._roi_anchor = None
         self._roi_drag: str | None = None
+        self._roi_prev: tuple | None = None
+        self._hover: str | None = None   # "roi" | "outline" | None
         self._roi_grab = (0.0, 0.0)     # cursor offset from centre, at grab time
         self._roi_start: tuple | None = None
 
@@ -189,6 +196,24 @@ class PreviewView(QLabel):
         if n < 1e-6:
             return QPointF(top.x(), top.y() - ROI_ROT_ARM)
         return QPointF(top.x() + vx / n * ROI_ROT_ARM, top.y() + vy / n * ROI_ROT_ARM)
+
+    def _set_hover(self, hit: str | None) -> None:
+        """Remember which overlay the cursor is over, and repaint if it moved.
+
+        This is the whole answer to "which one am I about to edit?". With two
+        draggable overlays on one picture, a cursor shape alone is not enough:
+        a move cursor over the region and a move cursor over the outline look
+        the same. Brightening the one under the pointer and dimming the other
+        makes it unambiguous before the click, which is when it matters.
+        """
+        which = None
+        if hit in ("move", "length", "width", "rotate"):
+            which = "outline"
+        elif hit is not None and hit != "roi_new":
+            which = "roi"
+        if which != self._hover:
+            self._hover = which
+            self.update()
 
     def _roi_hit(self, pos: QPointF) -> str | None:
         """Which part of the region is under the cursor, if any."""
@@ -274,6 +299,18 @@ class PreviewView(QLabel):
         # outside it is dimmed rather than hidden, so you can still see what you
         # excluded and why -- a region that has clipped the robot is obvious at
         # a glance instead of looking like a tracking failure.
+        # When both overlays are editable, the one under the cursor is drawn at
+        # full strength and the other is faded. Two identical-looking dashed
+        # outlines with no way to tell which responds to a drag was the whole
+        # complaint; this answers it before the click rather than after.
+        both = self.roi_edit and self.editable and self.pose is not None
+        roi_col = QColor(self._color)
+        tpl_col = QColor(self._color)
+        if both and self._hover == "outline":
+            roi_col.setAlpha(90)
+        elif both and self._hover == "roi":
+            tpl_col.setAlpha(90)
+
         if self.roi is not None:
             poly = self._roi_polygon()
             full = QRectF(ox, oy, w * z, h * z)
@@ -288,16 +325,16 @@ class PreviewView(QLabel):
             p.setBrush(QColor(0, 0, 0, 110))
             p.drawPath(outside.subtracted(inside))
 
-            p.setPen(QPen(self._color, 2.0, Qt.DashLine))
+            p.setPen(QPen(roi_col, 2.0, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
             p.drawPolygon(poly)
 
             if self.roi_edit:
                 grip = self._roi_rot_grip()
                 top = self._roi_point(0, -1)
-                p.setPen(QPen(self._color, 1.4))
+                p.setPen(QPen(roi_col, 1.4))
                 p.drawLine(top, grip)
-                p.setBrush(self._color)
+                p.setBrush(roi_col)
                 p.setPen(QPen(QColor("#0A0E16"), 1.2))
                 p.drawEllipse(grip, HANDLE_R - 1.0, HANDLE_R - 1.0)
                 for u, v in ROI_HANDLES.values():
@@ -313,14 +350,14 @@ class PreviewView(QLabel):
 
         # Dashed, so a placed outline never reads as a measured result. The
         # fitted outline the analysis produces is drawn solid.
-        pen = QPen(self._color, 2.0, Qt.DashLine if self.editable else Qt.SolidLine)
+        pen = QPen(tpl_col, 2.0, Qt.DashLine if self.editable else Qt.SolidLine)
         pen.setCosmetic(True)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
         p.drawPolygon(poly)
 
         center = self._to_widget(self.pose[0], self.pose[1])
-        p.setBrush(self._color)
+        p.setBrush(tpl_col)
         p.setPen(QPen(QColor("#0A0E16"), 1.0))
         p.drawEllipse(center, 3.5, 3.5)
 
@@ -328,11 +365,11 @@ class PreviewView(QLabel):
             return
 
         hs = self._handles()
-        p.setPen(QPen(self._color, 1.4))
+        p.setPen(QPen(tpl_col, 1.4))
         p.setBrush(Qt.NoBrush)
         for name, pt in hs.items():
             p.drawLine(center, pt)
-        p.setBrush(self._color)
+        p.setBrush(tpl_col)
         p.setPen(QPen(QColor("#0A0E16"), 1.2))
         if "length" in hs:
             p.drawEllipse(hs["length"], HANDLE_R, HANDLE_R)
@@ -343,6 +380,7 @@ class PreviewView(QLabel):
     # ---- interaction -----------------------------------------------------
 
     def _hit(self, pos: QPointF) -> str | None:
+        """Which part of the *outline* is under the cursor."""
         for name, pt in self._handles().items():
             if (pt - pos).manhattanLength() <= GRAB_SLOP * 2:
                 d = math.hypot(pt.x() - pos.x(), pt.y() - pos.y())
@@ -355,33 +393,64 @@ class PreviewView(QLabel):
                 return "move"
         return None
 
+    def hit_test(self, pos: QPointF) -> str | None:
+        """What a click here would grab, with both overlays live.
+
+        The region and the hand-placed outline occupy the same picture and the
+        outline is normally *inside* the region, so with both editable every
+        click landed on the region and the outline could not be touched at all.
+
+        Priority is by specificity, not by layer: handles before bodies,
+        because a handle is a small deliberate target and a body is most of the
+        frame; then the outline's body before the region's, because the outline
+        is the smaller and more precisely placed of the two and the region is
+        still reachable everywhere around it. Drawing a fresh region is last,
+        so it can never pre-empt an adjustment to something already there.
+        """
+        outline_live = self.editable and self.pose is not None
+        hit = self._hit(pos) if outline_live else None
+        if hit is not None and hit != "move":
+            return hit                                   # outline handle
+        roi_hit = self._roi_hit(pos) if self.roi_edit else None
+        if roi_hit is not None and roi_hit != "roi_body":
+            return roi_hit                               # region handle or grip
+        if hit == "move":
+            return hit                                   # inside the outline
+        if roi_hit is not None:
+            return roi_hit                               # inside the region
+        return "roi_new" if (self.roi_edit and self._frame is not None) else None
+
     def mousePressEvent(self, ev):
-        if self.roi_edit and ev.button() == Qt.LeftButton and self._frame is not None:
-            # Grabbing an existing region edits it; clicking anywhere else
-            # starts a new one. That ordering matters -- the alternative,
-            # requiring a mode switch between "draw" and "adjust", means every
-            # small correction costs two clicks somewhere else in the window.
-            hit = self._roi_hit(ev.position())
-            if hit is not None:
-                self._roi_drag = hit
-                self._roi_start = self.roi
-                cx, cy, _, _, _ = self._roi_center()
-                ix, iy = self._to_image(ev.position())
-                self._roi_grab = (cx - ix, cy - iy)
-                self.setCursor(QCursor(ROI_CURSORS.get(hit, Qt.CrossCursor)))
-                ev.accept()
-                return
+        if ev.button() != Qt.LeftButton:
+            return super().mousePressEvent(ev)
+        hit = self.hit_test(ev.position())
+        if hit is None:
+            return super().mousePressEvent(ev)
+
+        if hit in ROI_CURSORS or hit in ROI_HANDLES:
+            self._roi_drag = hit
+            self._roi_start = self.roi
+            cx, cy, _, _, _ = self._roi_center()
+            ix, iy = self._to_image(ev.position())
+            self._roi_grab = (cx - ix, cy - iy)
+            self.setCursor(QCursor(ROI_CURSORS.get(hit, Qt.CrossCursor)))
+            ev.accept()
+            return
+
+        if hit == "roi_new":
             self._roi_anchor = self._to_image(ev.position())
+            # Keep the old region until a new one is actually big enough to be
+            # a region. Clearing on press meant a single stray click anywhere on
+            # the frame silently destroyed a carefully placed region -- and a
+            # stray click is exactly what happens when you are reaching for the
+            # outline underneath it.
+            self._roi_prev = self.roi
             self.roi = None
             self.update()
             ev.accept()
             return
-        if not self.editable or self.pose is None or ev.button() != Qt.LeftButton:
-            return super().mousePressEvent(ev)
+
         pos = ev.position()
-        hit = self._hit(pos)
-        if hit is None:
-            return super().mousePressEvent(ev)
         if hit == "move" and (ev.modifiers() & Qt.ControlModifier):
             hit = "rotate"
         self._drag = hit
@@ -402,15 +471,12 @@ class PreviewView(QLabel):
             self.update()
             ev.accept()
             return
-        if self.roi_edit and self.roi is not None and self._drag is None:
-            hit = self._roi_hit(pos)
-            self.setCursor(QCursor(ROI_CURSORS.get(hit, Qt.CrossCursor)))
         if self._drag is None:
-            if self.editable and self.pose is not None:
-                hit = self._hit(pos)
-                self.setCursor({"move": Qt.OpenHandCursor,
-                                "length": Qt.CrossCursor,
-                                "width": Qt.CrossCursor}.get(hit, Qt.ArrowCursor))
+            # One hover query for both overlays, so the cursor and the
+            # highlight always agree with what a click would actually grab.
+            hit = self.hit_test(pos)
+            self._set_hover(hit)
+            self.setCursor(QCursor(HOVER_CURSORS.get(hit, Qt.ArrowCursor)))
             return super().mouseMoveEvent(ev)
 
         ix, iy = self._to_image(pos)
@@ -504,6 +570,10 @@ class PreviewView(QLabel):
             return
         if self.roi_edit and self._roi_anchor is not None:
             self._roi_anchor = None
+            if self.roi is None and self._roi_prev is not None:
+                self.roi = self._roi_prev      # too small to be a drag: a click
+                self.update()
+            self._roi_prev = None
             self.roiChanged.emit(self.roi)
             ev.accept()
             return

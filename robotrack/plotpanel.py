@@ -77,7 +77,13 @@ def average_delta(t: np.ndarray, y: np.ndarray,
         return rng, 0
     deltas = [abs(float(y[clean[i + 1][0]] - y[clean[i][0]]))
               for i in range(len(clean) - 1)]
-    return float(np.mean(deltas)), len(deltas)
+    # Cycles, not turning points. ``deltas`` counts peak-to-trough *half*
+    # swings, so returning its length reported very close to twice the real
+    # cycle count -- 89 for the 45 contractions in a 45.5 s clip at 1.0000 Hz,
+    # which is exactly 2n-1. The detection was never the problem; only the
+    # label was. One cycle is one peak and one trough, so it is half the
+    # alternating sequence.
+    return float(np.mean(deltas)), len(clean) // 2
 
 
 def decimate(t: np.ndarray, ys: list, max_points: int = 1400):
@@ -204,7 +210,10 @@ class PlotPanel(QWidget):
             "tracker noise never cancels in that sum — it accumulates with the "
             "number of samples, so a stationary robot still gains distance at "
             "60 samples a second. Sampling lower cuts the noise in proportion "
-            "and leaves real displacement alone.")
+            "and leaves real displacement alone.\n\nThis is not the Smoothing "
+            "setting under Analysis. Smoothing keeps every frame and pulls each "
+            "one toward its neighbours, which is what length wants; this throws "
+            "frames away, which is the only thing that helps a sum.")
         self.spin_traj.valueChanged.connect(self._on_traj_hz)
         rl.addWidget(self.spin_traj)
         self.lbl_traj = QLabel("every frame"); self.lbl_traj.setObjectName("Readout")

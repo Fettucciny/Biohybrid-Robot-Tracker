@@ -356,19 +356,43 @@ HELP: dict[str, dict] = {
     "smoothing": {
         "title": "Smoothing window",
         "short": "Savitzky-Golay filter width, in milliseconds of real time.",
-        "what": "Specified as physical time rather than a frame count, then converted "
-                "using the measured frame rate. This is what makes a 30 Hz and a "
-                "120 Hz recording of the same robot give comparable numbers — a fixed "
-                "frame count would mean 167 ms at 30 Hz but only 42 ms at 120 Hz.",
+        "what": "A Savitzky-Golay filter over the measured series: every frame keeps "
+                "its own timestamp and its own value, and each value is replaced by "
+                "a local polynomial fit through its neighbours. Nothing is dropped "
+                "and nothing is re-timed. It removes noise; it does not change how "
+                "often you measured.\n\n"
+                "This is *not* the same control as trajectory sampling, and the two "
+                "do different jobs on purpose:\n\n"
+                "• Smoothing keeps every frame and pulls each one toward its "
+                "neighbours. Use it for length, and for anything read off length.\n"
+                "• Trajectory sampling, under the plots, throws frames away — it "
+                "takes the centroid at, say, 5 Hz and ignores the rest. Use it for "
+                "path length and speed.\n\n"
+                "They are not interchangeable because path length is a *sum*, and "
+                "summing noise adds distance that was never travelled. Smoothing "
+                "reduces the size of each spurious step but still adds up all of "
+                "them; sampling removes the steps entirely. Measured on real "
+                "footage, jitter at 60 fps inflated path speed by a factor of 260, "
+                "which no amount of smoothing recovers.\n\n"
+                "Why it is set in milliseconds: the *number of frames* the window "
+                "covers is what determines how much real signal it removes, and "
+                "that number depends on the frame rate. A 5-frame window is 167 ms "
+                "at 30 fps and 42 ms at 120 fps — the same setting, four times the "
+                "smoothing. You are right that each frame already carries its own "
+                "timestamp; the filter uses those. What the timestamps cannot do is "
+                "decide how wide the window should be, and expressing the width in "
+                "time rather than frames is what makes the same number mean the same "
+                "thing on both recordings.",
         "range": "0 – 2000 ms (0 disables)",
         "default": "100 ms",
         "guidance": [
-            "Raise it to reduce tracking jitter, which otherwise inflates cumulative "
-            "path length by adding distance never traveled.",
             "Keep it well under one contraction period, or you will flatten the "
             "contraction you are trying to measure. At 1.5 Hz (667 ms period), stay "
             "below roughly 150 ms.",
-            "Applies to position and size, and to the velocities derived from them.",
+            "For path length and speed, reach for trajectory sampling instead — "
+            "that is the control that fixes jitter-inflated distance.",
+            "Applies to position and size, and to the velocities derived from them. "
+            "The unsmoothed values stay in the CSV as the _raw columns.",
         ],
     },
     "min_confidence": {

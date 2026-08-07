@@ -507,6 +507,7 @@ class MainWindow(QMainWindow):
         self.outdir: str | None = None
         self._preview: PreviewWorker | None = None
         self._pending = False
+        self._preview_busy = False
         self._startup_warning = startup_warning
         self.model: ColorModel | None = None
         self._frame_cache: dict = {}
@@ -839,7 +840,7 @@ class MainWindow(QMainWindow):
         self.btn_rebuild.setObjectName("Ghost")
         self.btn_rebuild.clicked.connect(self._reload)
         self.btn_rebuild.setVisible(False)
-        c.add_widget(self.btn_rebuild, advanced=True)
+        c.add_widget(self.btn_rebuild)
 
         # -------------------------------------------------- fitting
         # The whole card is advanced. Nothing in it needs changing to analyse a
@@ -1782,7 +1783,9 @@ class MainWindow(QMainWindow):
                    self.cmb_thr, self.spin_thr, self.spin_open, self.spin_close,
                    self.spin_minarea, self.spin_gap, self.spin_bg, self.spin_tau,
                    self.spin_tauf, self.spin_restarts, self.spin_cover,
-                   self.spin_prior, self.spin_maxscale, self.spin_smooth,
+                   self.spin_prior, self.spin_maxscale,
+                   self.spin_widthw, self.spin_widthtol, self.spin_lenover,
+                   self.spin_smooth,
                    self.spin_conf, self.spin_gapms, self.spin_ppm,
                    self.cmb_scale, self.chk_overlay, self.chk_gpu,
                    self.chk_mask, self.chk_fit, self.chk_manual,
@@ -2395,9 +2398,23 @@ class MainWindow(QMainWindow):
         self._sync_roi_label()
 
     def _on_roi_drawn(self, roi):
+        was = list(self.roi) if self.roi else None
         self.roi = list(roi) if roi else None
         self._sync_roi_label()
         self._touch()
+        # The region is not just a clip: the medium's color and the robot's are
+        # estimated from inside it. That estimate is made once, when the clip is
+        # opened, so after moving the region the preview kept segmenting with
+        # the *old* region's color model and looked unchanged no matter what you
+        # did -- the region appeared to be stuck on whichever one you drew
+        # first. The analysis itself always re-estimates, so this only ever
+        # affected the picture; it still made the control feel broken.
+        if was != self.roi and self.reader is not None:
+            self._reload_needed()
+            self.btn_rebuild.setText("Re-estimate colors in this region")
+            self._log("region changed — press \u201cRe-estimate colors in this "
+                      "region\u201d to update the preview's color model. "
+                      "A run always re-estimates.")
         self._render_preview()
 
     def _clear_roi(self):
@@ -2717,6 +2734,7 @@ class MainWindow(QMainWindow):
             return
         self._stop_play()
         self.btn_rebuild.setVisible(False)
+        self.btn_rebuild.setText("Rebuild background")
         self._set_enabled(False)
         self.view.set_frame(None, (0, 0))
         self.view.set_pose(None, editable=False)
@@ -2769,7 +2787,19 @@ class MainWindow(QMainWindow):
     def _render_preview(self):
         if self.reader is None:
             return
-        if self._preview is not None and self._preview.isRunning():
+        # Gated on our own flag, not on QThread.isRunning().
+        #
+        # `done` is emitted from inside the worker's run(), so by the time the
+        # queued slot executes on the GUI thread the worker has usually -- but
+        # only usually -- finished. When it has not, the re-render that
+        # _preview_done fires lands here, sees isRunning() still True, sets
+        # _pending and returns... and no further `done` is coming, so the
+        # preview never updates again for the rest of the session. Whether that
+        # happens is scheduler timing, which is why it showed up as "the
+        # preview does not live-update on the Mac" while the identical code was
+        # fine on a faster Windows box. This flag is cleared by the slot itself,
+        # so it cannot race with thread teardown.
+        if self._preview_busy:
             self._pending = True          # coalesce; re-render when this one lands
             return
         t = self.slider.value() / (self.info.measured_fps or 30.0)
@@ -2806,9 +2836,11 @@ class MainWindow(QMainWindow):
             fitter=self._fitter,
             view=self._view_mode())
         self._preview.done.connect(self._preview_done)
+        self._preview_busy = True
         self._preview.start()
 
     def _preview_done(self, img, status, err, fitted):
+        self._preview_busy = False
         if err:
             self._log(err.strip().splitlines()[-1])
         elif img is not None:
@@ -2937,6 +2969,15 @@ class MainWindow(QMainWindow):
         )
         if manual:
             self._log("seeding the fit from the hand-placed outline")
+        # Say out loud which region this run used. A region is invisible in the
+        # output but decides what was measured, and "did it use the one I just
+        # drew?" is otherwise unanswerable without opening run_info.json.
+        if cfg.segment.roi:
+            r = list(cfg.segment.roi)
+            turn = f", turned {r[4]:+.1f}\u00b0" if len(r) > 4 and abs(r[4]) > 0.05 else ""
+            self._log(f"region: {r[2]} \u00d7 {r[3]} px at ({r[0]}, {r[1]}){turn}")
+        else:
+            self._log("region: whole frame")
         self.btn_run.setText("Abort")
         self.btn_run.setProperty("primary", False)
         self.btn_run.style().unpolish(self.btn_run)
@@ -3011,6 +3052,11 @@ class MainWindow(QMainWindow):
         # whole point is to be heard by someone who has walked away from it.
         snd.finished(self.state.get("sound_enabled", True))
         self._log(res.summary())
+        # Notes are things the run wants read, not skimmed past in a summary
+        # block -- an accelerator that failed its self-check, a region that
+        # clips the robot. Repeated on their own lines for that reason.
+        for note in getattr(res, "notes", []) or []:
+            self._log(f"note: {note}")
         self._result = res
         self.btn_export_sel.setEnabled(True)
         self._record_throughput(res)

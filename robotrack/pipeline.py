@@ -14,7 +14,7 @@ import pandas as pd
 
 from .cad import Template, load_dxf
 from .decode import FrameReader, select_backend
-from .gpu import Device, get_device
+from .gpu import Device, get_device, verify_device
 from .ingest import VideoInfo, probe
 from .kinematics import (AnalysisConfig, derivative, dominant_frequency,
                          gate_and_fill, path_length, smooth)
@@ -144,6 +144,10 @@ class Result:
     aspect_measured: float = float("nan")
     aspect_drawn: float = float("nan")
     stage_times: dict = field(default_factory=dict)
+    # Non-fatal things the run wants to say out loud, e.g. an accelerator that
+    # failed its self-check. Carried on the result rather than logged from deep
+    # inside the pipeline, so the CLI and the GUI both get them.
+    notes: list = field(default_factory=list)
 
     def _timing_lines(self) -> list[str]:
         st = self.stage_times or {}
@@ -155,6 +159,7 @@ class Result:
                           for k, v in sorted(st.items(), key=lambda kv: -kv[1]))
         lines = [f"  time per frame   : {parts}",
                  f"  throughput       : {n / total:.1f} frames/s over {n} frames"]
+        lines += [f"  NOTE             : {m}" for m in (self.notes or [])]
         if not self.device.accelerated:
             lines.append("  WARNING          : running on the CPU. The fit is the "
                          "dominant cost and is roughly 20x slower here than on an "
@@ -328,6 +333,17 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
 
     info = probe(cfg.video)
     dev = get_device(cfg.gpu)
+    # A backend that samples images wrongly does not raise -- it returns
+    # plausible numbers the optimizer then converges on. Checking once here is
+    # what turns "it tracks on Windows but wanders on the Mac" into a line in
+    # the log and a correct run.
+    notes: list[str] = []
+    trust_note = ""
+    trusted, why = verify_device(dev)
+    if not trusted:
+        trust_note = (f"{dev} failed its self-check ({why}) — the fit ran on "
+                      f"the CPU instead, which is correct but slower")
+        dev = get_device(False)
     backend = select_backend(info)
     reader = FrameReader(info, backend, scale=cfg.scale)
 
@@ -341,6 +357,18 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     rows = []
     outlines: dict[int, np.ndarray] = {}
     every = max(int(cfg.preview_every), 0) if on_frame is not None else 0
+
+    def wants_outline(index: int) -> bool:
+        """Whether this frame's fitted outline is needed by anything.
+
+        Two separate consumers, and they used to be one condition: the overlay
+        video needs every frame's outline, and the live preview needs every
+        sixth. Deriving both from ``write_overlay`` meant that turning the
+        overlay video off also turned off the green outline on the picture you
+        watch while the run happens -- which reads as the tracker having
+        stopped working, not as a setting.
+        """
+        return bool(cfg.write_overlay) or bool(every and index % every == 0)
     # Where the time actually goes. A run that takes twenty seconds one day and
     # ten minutes the next is almost always one stage, not a general slowdown,
     # and without this the only way to find out is to guess.
@@ -360,6 +388,8 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         # rotated region carries a fifth that must not be scaled like a length.
         rect = tuple(int(round(float(v) * cfg.scale)) for v in tuple(ref_rect)[:4])
         tracker = AppearanceTracker(ref_frame, rect, ref_pose, AppearanceConfig())
+        if getattr(tracker, "clipped", ""):
+            notes.append(tracker.clipped)
 
     t_seg = t_fit = t_draw = 0.0
     t_mark = time.time()
@@ -387,7 +417,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
                            width_px=pose.sx * wmm, length_px=pose.sy * lmm,
                            theta=pose.theta, confidence=pose.confidence,
                            fit_cost=pose.cost, scale_x=pose.sx, scale_y=pose.sy)
-                if cfg.write_overlay and fitter is not None:
+                if fitter is not None and wants_outline(m.index):
                     outlines[m.index] = fitter.outline(pose)
         elif fitter is not None:
             t0 = time.time()
@@ -405,7 +435,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
                     feature_fit=pose.feature_fit,
                     scale_x=pose.sx, scale_y=pose.sy,
                 )
-                if cfg.write_overlay:
+                if wants_outline(m.index):
                     outlines[m.index] = fitter.outline(pose)
         else:
             ms = measure_mask(m.mask)
@@ -416,7 +446,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
                 rec.update(cx=ms.cx, cy=ms.cy, width_px=ms.width_px,
                            length_px=ms.length_px, theta=ms.theta,
                            confidence=1.0, fit_cost=np.nan)
-                if cfg.write_overlay and m.contour is not None:
+                if m.contour is not None and wants_outline(m.index):
                     outlines[m.index] = m.contour
         t0 = time.time()
         if every and m.index % every == 0:
@@ -425,6 +455,10 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
             # full-frame copy per frame to the hot loop for a picture nobody can
             # read at 36 fps anyway.
             on_frame(m.index, _overlay_frame(m, rec, outlines.get(m.index)))
+            if not cfg.write_overlay:
+                # Computed for the picture, not for a file. Dropping it keeps
+                # the dictionary from growing across a long run for no reason.
+                outlines.pop(m.index, None)
         t_draw += time.time() - t0
         rows.append(rec)
         if on_row is not None:
@@ -559,7 +593,8 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
                  force_method=method, resting_length_mm=rest_mm,
                  aspect_measured=aspect_ratio, aspect_drawn=aspect_drawn,
                  stage_times={"decode+segment": t_seg, "fit": t_fit,
-                              "live preview": t_draw})
+                              "live preview": t_draw},
+                 notes=(([trust_note] if trust_note else []) + notes))
 
     # --- outputs -------------------------------------------------------------
     drop = [c for c in t.columns

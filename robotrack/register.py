@@ -236,12 +236,23 @@ def _sample(D: torch.Tensor, pts: torch.Tensor,
         pts = pts - origin
     gx = 2.0 * pts[..., 0] / (W - 1) - 1.0
     gy = 2.0 * pts[..., 1] / (H - 1) - 1.0
-    grid = torch.stack([gx, gy], dim=-1).view(K, M, 1, 2)
+    # One batch of K*M points against the single real image, rather than K
+    # broadcast copies of it.
+    #
+    # ``D.expand(K, 1, H, W)`` is a stride-0 view: K batch entries all pointing
+    # at the same memory. CUDA and CPU handle that; Metal has repeatedly not,
+    # and a grid_sample that silently reads the wrong batch entry produces a
+    # fit that converges confidently onto nothing in particular -- which is
+    # what "tracks on Windows, wanders on the Mac" looked like. Flattening the
+    # points into one batch removes the broadcast entirely, is arithmetically
+    # identical, and is marginally faster everywhere because there is no
+    # K-way indexing to do.
+    grid = torch.stack([gx, gy], dim=-1).reshape(1, K * M, 1, 2)
     # padding_mode='border' matters: zero padding would make points that wander
     # off-image look like perfect matches and create phantom optima.
-    out = F.grid_sample(D.expand(K, 1, H, W), grid, mode="bilinear",
+    out = F.grid_sample(D, grid, mode="bilinear",
                         padding_mode="border", align_corners=True)
-    return out.view(K, M)
+    return out.reshape(K, M)
 
 
 def soft_mask(mask: np.ndarray, dev: Device, sigma: float = 2.0) -> torch.Tensor:
@@ -432,9 +443,9 @@ class ShapeFitter:
 
         g = (local - self.sdf_origin) / self.sdf_spacing
         g = 2.0 * g / (self.sdf_res - 1) - 1.0
-        d = F.grid_sample(self.sdf.expand(K, 1, self.sdf_res, self.sdf_res),
-                          g.view(K, -1, 1, 2), mode="bilinear",
-                          padding_mode="border", align_corners=True).view(K, -1)
+        # Same flattening as _sample, for the same reason: no stride-0 batch.
+        d = F.grid_sample(self.sdf, g.reshape(1, -1, 1, 2), mode="bilinear",
+                          padding_mode="border", align_corners=True).reshape(K, -1)
         outside = d.clamp_min(0.0)
         tau2 = self.cfg.coverage_tau_mm ** 2
         return (outside * outside / (outside * outside + tau2)).mean(dim=1)

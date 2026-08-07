@@ -60,6 +60,66 @@ def get_device(prefer_gpu: bool = True) -> Device:
     return Device(torch.device("cpu"), platform.processor() or "CPU", False, 0.0, "cpu")
 
 
+_TRUST_CACHE: dict[str, tuple[bool, str]] = {}
+
+
+def verify_device(dev: Device) -> tuple[bool, str]:
+    """Check that this backend computes what the fitter needs it to.
+
+    Why this exists rather than trusting the driver: the whole tracker rests on
+    ``grid_sample`` and on autograd through it, and a backend that gets either
+    subtly wrong does not raise. It returns numbers, the optimizer converges on
+    them, and the result is a confident fit on the wrong part of the picture --
+    indistinguishable from a hard clip, and reported as "it tracks on Windows
+    but wanders on the Mac". There is no error to look for because nothing
+    errors.
+
+    So: run one small problem whose answer is known, on this device and on the
+    CPU, and compare. It costs about a millisecond, once per session.
+
+    Returns ``(trustworthy, note)``. This function never falls back on its own,
+    because silently moving work to the CPU without saying so is how a
+    five-minute run becomes an hour with no explanation. The caller decides,
+    and tells the user.
+    """
+    if dev.kind == "cpu":
+        return True, ""
+    cached = _TRUST_CACHE.get(dev.kind)
+    if cached is not None:
+        return cached
+
+    result: tuple[bool, str] = (True, "")
+    try:
+        g = torch.Generator().manual_seed(11)
+        img = torch.rand(1, 1, 48, 64, generator=g)
+        pts = torch.rand(6, 40, 2, generator=g) * 2.0 - 1.0
+
+        def probe(device):
+            im = img.to(device)
+            p = pts.to(device).clone().requires_grad_(True)
+            out = F.grid_sample(im, p.reshape(1, -1, 1, 2), mode="bilinear",
+                                padding_mode="border", align_corners=True)
+            out = out.reshape(6, 40)
+            (out * out).sum().backward()
+            return out.detach().cpu(), p.grad.detach().cpu()
+
+        ref_v, ref_g = probe(torch.device("cpu"))
+        got_v, got_g = probe(dev.torch_device)
+        # Loose thresholds, because a different backend is entitled to a
+        # different rounding order. This is looking for wrong answers, not for
+        # the last bit.
+        dv = float((ref_v - got_v).abs().max())
+        dg = float((ref_g - got_g).abs().max())
+        if not (dv < 2e-3 and dg < 2e-2):
+            result = (False, f"image sampling differs from the CPU by {dv:.3g} "
+                             f"(gradient {dg:.3g})")
+    except Exception as exc:                # noqa: BLE001 -- any failure is a failure
+        result = (False, f"{type(exc).__name__}: {exc}")
+
+    _TRUST_CACHE[dev.kind] = result
+    return result
+
+
 def _otsu_cpu(flat: torch.Tensor, bins: int) -> float:
     lo, hi = float(flat.min()), float(flat.max())
     if hi <= lo:

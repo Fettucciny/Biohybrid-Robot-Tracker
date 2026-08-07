@@ -145,6 +145,29 @@ class AppearanceTracker:
         self._base = self._warp.copy()
         self.last_cc = 1.0
 
+        # Does the patch actually contain the robot?
+        #
+        # This mode measures length by watching the whole patch deform, so a
+        # region that clips the robot's ends removes exactly the evidence the
+        # length is read from. The failure is silent and total: correlation
+        # stays high, tracking looks perfect, and the reported length simply
+        # does not change. It cost an hour of chasing a real bug that turned out
+        # to be a badly cropped test fixture, which is precisely what a user
+        # would do to themselves by drawing the region tightly.
+        self.clipped = ""
+        if ref_pose is not None:
+            hw = abs(ref_pose.sx) * 0.5, abs(ref_pose.sy) * 0.5
+            c, s = abs(np.cos(ref_pose.theta)), abs(np.sin(ref_pose.theta))
+            need_x = 2.0 * (hw[0] * c + hw[1] * s)
+            need_y = 2.0 * (hw[0] * s + hw[1] * c)
+            have_x, have_y = x1 - x0, y1 - y0
+            if need_x > have_x * 1.02 or need_y > have_y * 1.02:
+                self.clipped = (
+                    f"the region is {have_x}x{have_y} px but the outline needs "
+                    f"about {need_x:.0f}x{need_y:.0f} — appearance tracking "
+                    f"reads length from the whole patch, so a region that cuts "
+                    f"the robot off will report little or no length change")
+
     # ---- per frame -------------------------------------------------------
 
     def track(self, frame: np.ndarray) -> Pose | None:
@@ -196,14 +219,35 @@ class AppearanceTracker:
             return Pose(cx, cy, d_theta, r_sx, r_sy, cost=1.0 - cc, confidence=cc)
 
         p = self.ref_pose
-        # The patch and the template share a frame, so the patch's motion is the
-        # template's motion: rotate the reference centre about the patch origin
-        # and scale the template's own scales by the same ratios.
+        # The warp's two scales are along the *image* axes; the pose's are along
+        # the *template's*. Multiplying one by the other is only correct when
+        # those frames coincide -- when the robot happens to lie parallel to the
+        # picture -- and the error grows with the angle between them until, at
+        # 90 degrees, length and width have swapped and a contraction is
+        # reported as no change at all. Measured on a synthetic 12% contraction:
+        # 0.2% error with the robot upright, 5% at 40 degrees, and the entire
+        # signal gone at 90. That is the discrepancy against the color path,
+        # and it is worst on exactly the footage this mode exists for -- a
+        # phone held over a dish, where nothing is square to anything.
+        #
+        # The fix is to ask the warp what it does to the template's own axes
+        # rather than reading its image-axis scales and hoping. R takes template
+        # directions into the reference image and A maps the reference image
+        # into this frame, so the columns of A.R are where the template's x and
+        # y axes ended up, and their lengths are the stretches along them.
+        A = np.asarray(warp, np.float64)[:, :2]
+        c0, s0 = np.cos(p.theta), np.sin(p.theta)
+        M = A @ np.array([[c0, -s0], [s0, c0]])
+        r_sx = float(np.hypot(M[0, 0], M[1, 0]))
+        r_sy = float(np.hypot(M[0, 1], M[1, 1]))
+
+        # Centre: apply the warp to the reference centre directly. The warp maps
+        # patch coordinates into this frame's pixels, which is precisely the
+        # question being asked, and needs no decomposition to be exact.
         ox, oy = self.origin
         vx, vy = p.tx - ox, p.ty - oy
-        ca, sa = np.cos(d_theta), np.sin(d_theta)
-        nx = tx + (vx * r_sx) * ca - (vy * r_sy) * sa
-        ny = ty + (vx * r_sx) * sa + (vy * r_sy) * ca
+        nx = A[0, 0] * vx + A[0, 1] * vy + float(warp[0, 2])
+        ny = A[1, 0] * vx + A[1, 1] * vy + float(warp[1, 2])
         return Pose(float(nx), float(ny), p.theta + d_theta,
                     p.sx * r_sx, p.sy * r_sy,
                     cost=1.0 - cc, confidence=cc, feature_fit=float("nan"))

@@ -784,6 +784,96 @@ weight, 0 turns it off), **Width tolerance** (the error at which it reaches full
 strength, 4%) and **Length overshoot** (the noise allowance on the ceiling,
 3 px).
 
+### Editing the region and the outline on the same picture
+
+With both the region and a hand placement live, every click landed on the
+region and the outline could not be touched at all — it sits *inside* the
+region, so the region always won.
+
+Priority is now by specificity rather than by layer: handles before bodies,
+because a handle is a small deliberate target and a body is most of the frame;
+then the outline's body before the region's, because the outline is the smaller
+and more precisely placed of the two and the region is still reachable
+everywhere around it. Drawing a fresh region comes last, so it can never
+pre-empt an adjustment to something already there.
+
+That fixes what a click does. It does not answer *which one am I about to
+edit*, and a cursor shape cannot — a move cursor over the region and a move
+cursor over the outline look identical. So whichever one the pointer is over is
+drawn at full strength and the other fades. You can see which will respond
+before you press, which is when it matters.
+
+A related repair: a stray click used to wipe the region. Pressing started a new
+one and cleared the old, and a drag too short to be a region left you with
+nothing — which is exactly what happens when you are reaching for the outline
+underneath it. The old region is now kept unless a new one is actually big
+enough to be one.
+
+### Cycle counts were double
+
+Reported cycles were consistently about twice the real number: 89 for the 45
+contractions in a 45.5 s clip whose dominant frequency was measured at 1.0000 Hz
+with an SNR of 77.
+
+The peak finder was never the problem. It found exactly 45 peaks and 45 troughs
+in that clip. `average_delta` returned the length of its *deltas* list, and those
+deltas are peak-to-trough half swings — so the count was 2n−1 by construction,
+which is why it was always almost exactly double rather than sometimes double.
+A cycle is one peak and one trough, so the count is half the alternating
+sequence. The amplitude it returns, the mean peak-to-trough swing, was correct
+throughout and is unchanged.
+
+### A DXF could take the process down
+
+Not raise — take it down, with no traceback and no dialog, which is why it read
+as "it sometimes crashes when opening a drawing".
+
+`signed_distance_grid` divides by the outline's own extent. A drawing can
+perfectly legally contain a zero-radius circle, a zero-length line or a run of
+identical vertices, and any of those makes that extent zero. The resulting
+infinity becomes `INT_MIN` under `astype(np.int32)` — undefined in numpy — and
+`cv2.fillPoly` indexes memory from those coordinates. There is no Python-level
+failure to catch.
+
+Three guards now, at the two places that matter. `load_dxf` refuses an outline
+with no extent or with non-finite coordinates, and says which. The distance grid
+refuses the same and additionally clips its raster coordinates, so the crash is
+unreachable from any future caller rather than only from the one path that
+found it.
+
+### Appearance tracking disagreed with the colour path about length
+
+It was reading its scales in the wrong frame of reference.
+
+`findTransformECC` returns an affine whose two scales are along the **image**
+axes. The pose it is composed onto carries scales along the **template's** axes.
+Multiplying one by the other is correct only when those frames coincide — when
+the robot happens to lie parallel to the picture — and the error grows with the
+angle between them until, at 90°, length and width have swapped and a
+contraction is reported as no change at all.
+
+Measured on a synthetic 12% contraction, before and after:
+
+| robot's angle in frame | 0° | 20° | 40° | 65° |
+|---|---|---|---|---|
+| error before | 0.002 | 0.012 | 0.052 | 0.103 |
+| error after | 0.002 | 0.003 | 0.004 | 0.004 |
+
+The fix asks the warp what it does to the template's *own* axes instead of
+reading its image-axis scales and hoping: the columns of `A·R(θ)` are where the
+template's x and y axes ended up, and their lengths are the stretches along
+them. The centre is now obtained by applying the warp to the reference centre
+directly, which is exact and needs no decomposition at all.
+
+This mattered most on exactly the footage the mode exists for — a phone held
+over a dish, where nothing is square to anything.
+
+One thing to know about this mode, now warned about at run start: it reads
+length from the whole reference patch deforming, so **the region must contain
+the whole robot**. A region that clips the ends removes the evidence, and the
+failure is silent and total — correlation stays high, tracking looks perfect,
+and the length simply does not change.
+
 ### Fragment grouping needs an envelope
 
 Regrouping fragments across an occlusion gap by proximity alone was tuned for a
@@ -853,6 +943,49 @@ per-stage breakdown, so the next time a clip feels slow the answer is in the log
 rather than in a guess. If `decode+segment` dominates, the bottleneck is I/O or
 the frame size — try decode scale 0.5. If `fit` dominates and the device chip in
 the header says CPU only, that is the whole story.
+
+### Two bugs that looked like macOS problems and were not
+
+**"The preview does not live-update on the Mac."** `_render_preview` refused to
+start while one was running, setting a `_pending` flag for the completion
+handler to pick up. It tested `QThread.isRunning()` — but `done` is emitted from
+*inside* the worker's `run()`, so when the queued slot executes on the GUI
+thread the worker has usually, though not always, finished. When it has not, the
+re-render the handler fires sees `isRunning()` still true, sets `_pending` again
+and returns. No further `done` is coming, so the preview never updates again for
+the rest of the session.
+
+Whether that happens is pure scheduler timing, which is why the identical code
+was fine on a fast Windows box and stuck on a Mac. It is gated on a flag the
+completion handler itself clears, which cannot race with thread teardown.
+
+**"Tracking latches onto the wrong region on the Mac."** Both `grid_sample`
+calls fed the backend a *stride-0 expanded* tensor — K batch entries all
+pointing at one image. CUDA and CPU handle that; Metal has repeatedly not, and a
+`grid_sample` that reads the wrong batch entry does not raise. It returns
+numbers, the optimizer converges on them, and the result is a confident fit on
+nothing in particular.
+
+Both calls now flatten the points into a single batch against the one real
+image. That removes the broadcast entirely, is bit-identical on CPU (verified),
+and is marginally faster everywhere.
+
+Because a wrong-but-plausible answer is the hard case, the accelerator is also
+now checked rather than trusted. At run start the program samples a small known
+image and backpropagates through it, on the device and on the CPU, and compares.
+It costs about a millisecond. If they disagree, the run says so in the log and
+completes on the CPU — correct and slower, rather than fast and wrong. It never
+falls back silently, because an unexplained five-minute-to-an-hour change is its
+own kind of bug.
+
+### The live outline was tied to writing a video
+
+Turning off **write overlay.mp4** also turned off the green fitted outline on
+the picture you watch while the run happens — which reads as the tracker having
+stopped working, not as a setting. Both consumers were derived from one flag.
+The overlay video needs every frame's outline; the live preview needs every
+sixth. They are now separate conditions, and the preview's copy is discarded
+after use so nothing accumulates across a long run.
 
 ### Interface speed
 
