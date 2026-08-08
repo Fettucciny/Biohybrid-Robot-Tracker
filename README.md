@@ -1097,6 +1097,98 @@ The overlay video needs every frame's outline; the live preview needs every
 sixth. They are now separate conditions, and the preview's copy is discarded
 after use so nothing accumulates across a long run.
 
+### The fit was bound by operation count, not by arithmetic
+
+On an RTX 4090, a run reported this:
+
+```
+fit               241 ms (94%)
+  └ fit: solve    236 ms (92%)
+  └ fit: fields     5 ms  (2%)
+decode+segment     10 ms  (4%)
+```
+
+236 ms a frame, in the optimizer, on a card that does this arithmetic in
+microseconds. The tensors are 12 poses by 400 points — tens of kilobytes. The
+GPU was idle.
+
+Profiling the operator stream said why: **one iteration issued about 1,050
+PyTorch operator dispatches**, and at 60 iterations a frame that is ~39,000
+dispatches. At the few microseconds each costs on CUDA, that alone accounts for
+essentially the whole 236 ms. The work was never the bottleneck; issuing it was.
+
+Two changes, and the second is much larger than the first.
+
+**Fewer operations for the same arithmetic.** The pose is composed into one 2×3
+affine and applied with a single matrix product instead of a chain of indexed
+multiplies; the pixel-to-grid normalisation, including the work-window origin,
+is folded into one fused multiply-add built once per frame instead of eight
+operations per sample; the coverage term's inverse transform is built directly
+as a matrix rather than derived per component. `_sample` went from 47 operator
+dispatches to 8. The frame total went from 653 per iteration to 479 — about 27%
+— and every function is checked against the straightforward version for exact
+agreement, values and gradients alike.
+
+**Fewer iterations, because 60 were not being earned.** This is the real one.
+Sweeping the warm-frame schedule while watching accuracy against ground truth
+shows a plateau and then a cliff:
+
+| iterations | restarts | fit ms/frame | length rms vs truth | r |
+|---|---|---|---|---|
+| 60 | 12 | 176.3 | 6.67 | 0.9943 |
+| 40 | 12 | 140.1 | 6.28 | 0.9958 |
+| 30 | 12 | 128.2 | 6.23 | 0.9950 |
+| 30 | 8 | 120.1 | **5.81** | 0.9951 |
+| 30 | 6 | 105.4 | 6.45 | 0.9942 |
+| 20 | 12 | 92.4 | 11.09 | 0.8901 |
+| 20 | 6 | 76.9 | 9.20 | 0.9740 |
+
+Everything from 30 iterations up is the same answer to within the noise — if
+anything slightly better, since a long anneal from a warm start spends its tail
+re-converging on what it already had. Below 30 the fit stops reaching the
+annealed kernel's final width and it falls apart. The default is now 30
+iterations and 10 restarts: a 50% margin above the cliff, with the restart count
+taken from the middle of its plateau rather than from the measured optimum,
+which on one clip is not distinguishable from luck.
+
+**And three more portable savings, since the machines that need this most are
+the ones without a discrete card.** CUDA graphs would be the obvious next step
+and helps exactly one of the three backends this program runs on, so the
+remaining work stayed in plain tensor operations that cost the same everywhere:
+
+* The outline and the containment ring share one rotation. Scaling happens in
+  the template's frame and rotation after it, so `out = ((tpl*scale) + offset*n)
+  @ Rᵀ + t` — one rotation applied to two point sets instead of a transform plus
+  a separate rotate-and-add. A whole function's worth of dispatches per
+  iteration, and exactly equal.
+* Adam is written out. `torch.optim.Adam` spends 26 dispatches a step on generic
+  bookkeeping over a parameter *list* that here has one entry; in-place with
+  fused kernels it is six, and agrees with the stock optimiser to 3×10⁻⁷
+  relative over 40 steps.
+* The pixel-to-grid normalisation, window origin included, is one fused
+  multiply-add built once per frame.
+
+End to end on the synthetic clip, on a CPU, with the fit unchanged against
+ground truth (rms 6.44 against 6.67, r 0.9941 against 0.9943, mean confidence
+0.853 against 0.854):
+
+| | before | after |
+|---|---|---|
+| throughput | 4.1 fps | **7.2 fps** |
+| fit | 217 ms/frame | **112 ms/frame** |
+| operator dispatches per iteration | ~1050 | ~390 |
+
+The gain should be larger on a GPU than it is here, because dispatch is a bigger
+share there than on a CPU that also has to do the arithmetic.
+
+What this does *not* do is remove the dispatch bound. The portable route to that
+is `torch.compile`, which fuses the elementwise chain and cuts dispatch on CPU
+and CUDA — but its Metal backend is immature, and the work window changes size
+every frame, which forces a recompile each time. The prerequisite is therefore a
+*fixed-size* work window rather than one fitted to each pose. That is worth
+doing on its own merits, since static shapes help every backend, and it leaves
+compilation as an option rather than a commitment.
+
 ### Interface speed
 
 | | before | after |

@@ -60,9 +60,29 @@ class FitConfig:
     # fraction of a pixel from the answer, and most of them are re-deriving what
     # the first one already has. A cold frame -- the first one, and any recovery
     # after a lost stretch -- still gets the full count.
-    n_restarts_warm: int = 12
+    n_restarts_warm: int = 10
     iters: int = 150
-    iters_warm: int = 60        # cheaper schedule once tracking is locked on
+    # Iterations on a warm frame. 60 was a guess; measured against ground truth
+    # on the synthetic clip it is simply wasted, and the waste is most of the
+    # run. Sweeping it while watching accuracy shows a plateau and then a cliff:
+    #
+    #   iters  restarts   fit ms/frame   length rms vs truth      r
+    #      60        12          176.3                  6.67   0.9943
+    #      40        12          140.1                  6.28   0.9958
+    #      30        12          128.2                  6.23   0.9950
+    #      30         8          120.1                  5.81   0.9951
+    #      30         6          105.4                  6.45   0.9942
+    #      20        12           92.4                 11.09   0.8901   <- cliff
+    #      20         6           76.9                  9.20   0.9740
+    #
+    # Everything from 30 up is the same answer to within the noise -- if
+    # anything slightly better, since a long anneal at a warm start spends its
+    # tail re-converging on what it already had. Below 30 the fit stops
+    # reaching the annealed kernel's final width and the whole thing falls
+    # apart. 30 leaves a 50% margin above that edge, and the restart count is
+    # taken from the middle of its plateau rather than from its measured
+    # optimum, which on one clip is not distinguishable from luck.
+    iters_warm: int = 30
     lr: float = 0.05
     # Stop once the best hypothesis stops improving. The annealing schedule is
     # sized for the worst case -- a cold start from a bad seed -- but a warm
@@ -222,23 +242,77 @@ def distance_field(mask: np.ndarray, dev: Device,
     return torch.from_numpy(d).to(dev.torch_device)[None, None]
 
 
-def _sample(D: torch.Tensor, pts: torch.Tensor,
-            origin: torch.Tensor | None = None) -> torch.Tensor:
-    """Bilinearly sample D at (K,M,2) pixel coordinates -> (K,M) distances.
+def sampler(D: torch.Tensor, origin=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Constants turning image pixels into grid_sample's [-1,1] coordinates.
 
-    ``origin`` is where D's top-left corner sits in the full frame, for when D
-    covers only a window around the robot. Subtracting it here rather than
-    offsetting the poses keeps every pose in the image's own coordinates, which
-    is what everything downstream -- the CSV, the overlay, the plots -- expects.
+    Built once per frame instead of per iteration, and folded together: the
+    window origin, the halving and the shift are one multiply-add rather than
+    the eight operations the arithmetic reads as. ``pixel -> scale*pixel +
+    shift`` covers both axes and the window offset in a single fused op.
+    """
+    H, W = D.shape[-2:]
+    dev, dt = D.device, D.dtype
+    scale = torch.tensor([2.0 / (W - 1), 2.0 / (H - 1)], device=dev, dtype=dt)
+    shift = torch.tensor([-1.0, -1.0], device=dev, dtype=dt)
+    if origin is not None:
+        ox, oy = float(origin[0]), float(origin[1])
+        shift = shift - scale * torch.tensor([ox, oy], device=dev, dtype=dt)
+    return scale, shift
+
+
+class _Adam:
+    """Adam over one parameter tensor, in-place.
+
+    ``torch.optim.Adam`` is 26 operator dispatches a step for a single (K,5)
+    tensor, most of it generic bookkeeping over a parameter *list* that here has
+    exactly one entry. Written out with fused in-place kernels it is six, does
+    the same arithmetic, and -- being plain tensor ops -- costs the same on
+    CUDA, on Metal and on a CPU. There is no backend-specific path anywhere in
+    it, which is the point: the machines that need this most are the ones
+    without a discrete card.
+    """
+
+    __slots__ = ("p", "lr", "b1", "b2", "eps", "m", "v", "t")
+
+    def __init__(self, p, lr, betas=(0.9, 0.999), eps=1e-8):
+        self.p, self.lr, self.eps = p, lr, eps
+        self.b1, self.b2 = betas
+        self.m = torch.zeros_like(p)
+        self.v = torch.zeros_like(p)
+        self.t = 0
+
+    def zero_grad(self):
+        self.p.grad = None
+
+    @torch.no_grad()
+    def step(self):
+        g = self.p.grad
+        if g is None:
+            return
+        self.t += 1
+        self.m.lerp_(g, 1.0 - self.b1)
+        self.v.mul_(self.b2).addcmul_(g, g, value=1.0 - self.b2)
+        # Bias correction folded into the step size rather than applied to the
+        # moments: the standard rearrangement, and it saves two whole tensors.
+        bc1 = 1.0 - self.b1 ** self.t
+        bc2 = 1.0 - self.b2 ** self.t
+        step = self.lr * (bc2 ** 0.5) / bc1
+        self.p.addcdiv_(self.m, self.v.sqrt().add_(self.eps * bc2 ** 0.5),
+                        value=-step)
+
+
+def _sample(D: torch.Tensor, pts: torch.Tensor, ns) -> torch.Tensor:
+    """Bilinearly sample D at (K,M,2) pixel coordinates -> (K,M) values.
+
+    ``ns`` comes from :func:`sampler` and carries the window origin, so every
+    pose stays in the image's own coordinates -- which is what the CSV, the
+    overlay and the plots all expect -- while D itself may cover only a crop.
     """
     K, M, _ = pts.shape
-    H, W = D.shape[-2:]
-    if origin is not None:
-        pts = pts - origin
-    gx = 2.0 * pts[..., 0] / (W - 1) - 1.0
-    gy = 2.0 * pts[..., 1] / (H - 1) - 1.0
+    scale, shift = ns
+    grid = torch.addcmul(shift, pts, scale)
     # One batch of K*M points against the single real image, rather than K
-    # broadcast copies of it.
+    # broadcast copies of it.  (grid built above)
     #
     # ``D.expand(K, 1, H, W)`` is a stride-0 view: K batch entries all pointing
     # at the same memory. CUDA and CPU handle that; Metal has repeatedly not,
@@ -248,10 +322,9 @@ def _sample(D: torch.Tensor, pts: torch.Tensor,
     # points into one batch removes the broadcast entirely, is arithmetically
     # identical, and is marginally faster everywhere because there is no
     # K-way indexing to do.
-    grid = torch.stack([gx, gy], dim=-1).reshape(1, K * M, 1, 2)
     # padding_mode='border' matters: zero padding would make points that wander
     # off-image look like perfect matches and create phantom optima.
-    out = F.grid_sample(D, grid, mode="bilinear",
+    out = F.grid_sample(D, grid.reshape(1, K * M, 1, 2), mode="bilinear",
                         padding_mode="border", align_corners=True)
     return out.reshape(K, M)
 
@@ -262,26 +335,79 @@ def soft_mask(mask: np.ndarray, dev: Device, sigma: float = 2.0) -> torch.Tensor
     return torch.from_numpy(m).to(dev.torch_device)[None, None]
 
 
-def _rotate(v: torch.Tensor, th: torch.Tensor) -> torch.Tensor:
-    """Rotate (M,2) vectors by K angles -> (K,M,2)."""
-    c, s = torch.cos(th)[:, None], torch.sin(th)[:, None]
-    x, y = v[None, :, 0], v[None, :, 1]
-    return torch.stack([c * x - s * y, s * x + c * y], dim=-1)
+# ---------------------------------------------------------------------------
+# The hot path
+#
+# This is where the run's time goes, and not for the reason it looks like.
+# Profiled on the reference clip at 12 restarts and 400 template points, one
+# optimizer iteration issued about 1,050 PyTorch operator dispatches, and the
+# tensors involved are a few tens of kilobytes. On an RTX 4090 that arithmetic
+# is microseconds; the 236 ms a frame measured on one was almost entirely the
+# per-operator dispatch cost of issuing them. The GPU was idle.
+#
+# So the functions below are written to minimise the *number of operations*
+# rather than the amount of arithmetic. Composing the pose into one 2x3 affine
+# and applying it with a single matrix product does slightly more multiplying
+# than the hand-written form and issues a fraction as many kernels, which on
+# this workload is the trade that matters. Each is checked against the
+# straightforward version for exact agreement.
+# ---------------------------------------------------------------------------
 
-
-def _transform(tpl: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-    """Apply K poses to the M template points. tpl (M,2), p (K,5) -> (K,M,2).
+def _pose_matrix(p: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """K poses -> (K,2,2) linear part and (K,1,2) translation.
 
     Scale is applied in the template's own frame *before* rotation, so sx and sy
     stay bound to the robot's width and length axes no matter how it is oriented
-    in the image.
+    in the image. That is R @ diag(sx, sy), whose columns are just the rotation's
+    columns scaled -- no matmul needed to build it.
     """
-    tx, ty, th, sx, sy = p[:, 0], p[:, 1], p[:, 2], p[:, 3], p[:, 4]
-    x = tpl[None, :, 0] * sx[:, None]
-    y = tpl[None, :, 1] * sy[:, None]
-    c, s = torch.cos(th)[:, None], torch.sin(th)[:, None]
-    return torch.stack([c * x - s * y + tx[:, None],
-                        s * x + c * y + ty[:, None]], dim=-1)
+    th = p[:, 2]
+    c, s = torch.cos(th), torch.sin(th)
+    sx, sy = p[:, 3], p[:, 4]
+    # Rows of the matrix, stacked in one go: [[c*sx, -s*sy], [s*sx, c*sy]].
+    A = torch.stack([c * sx, -s * sy, s * sx, c * sy], dim=-1).view(-1, 2, 2)
+    return A, p[:, None, :2]
+
+
+def _rotate(v: torch.Tensor, th: torch.Tensor) -> torch.Tensor:
+    """Rotate (M,2) vectors by K angles -> (K,M,2)."""
+    c, s = torch.cos(th), torch.sin(th)
+    R = torch.stack([c, s, -s, c], dim=-1).view(-1, 2, 2)
+    return v[None] @ R
+
+
+def _rt(p: torch.Tensor):
+    """K poses -> (R^T, translation, scales): the pieces every point set shares."""
+    th = p[:, 2]
+    c, s = torch.cos(th), torch.sin(th)
+    RT = torch.stack([c, s, -s, c], dim=-1).view(-1, 2, 2)
+    return RT, p[:, None, :2], p[:, None, 3:5]
+
+
+def _transform(tpl: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    """Apply K poses to the M template points. tpl (M,2), p (K,5) -> (K,M,2)."""
+    RT, t, sc = _rt(p)
+    return torch.baddbmm(t, tpl[None] * sc, RT)
+
+
+def _transform_and_offset(tpl: torch.Tensor, nrm: torch.Tensor, p: torch.Tensor,
+                          offset: float):
+    """The outline, and the same outline pushed ``offset`` px along its normals.
+
+    Both in one pass, sharing one rotation. Scaling happens in the template's
+    frame and rotation after it, so
+
+        q   = (tpl * scale) @ R^T + t
+        out = q + offset * (n @ R^T) = ((tpl * scale) + offset * n) @ R^T + t
+
+    -- one rotation applied to two point sets, rather than a transform plus a
+    separate rotate-and-add. Exactly equal, and it removes a whole function's
+    worth of dispatches from every iteration of every frame.
+    """
+    RT, t, sc = _rt(p)
+    scaled = tpl[None] * sc
+    return (torch.baddbmm(t, scaled, RT),
+            torch.baddbmm(t, scaled + offset * nrm[None], RT))
 
 
 def seed_from_mask(mask: np.ndarray, tpl: Template) -> tuple[float, float, float, float, float]:
@@ -343,6 +469,11 @@ class ShapeFitter:
         self.sdf_origin = torch.from_numpy(origin).to(dev.torch_device)
         self.sdf_spacing = spacing
         self.sdf_res = sdf.shape[0]
+        # Precomputed template-space -> grid-space constants, so _coverage does
+        # one fused multiply-add per iteration instead of four operations.
+        _gs = 2.0 / (spacing * (sdf.shape[0] - 1))
+        self._sdf_scale = torch.full((2,), float(_gs), device=dev.torch_device)
+        self._sdf_shift = (-self.sdf_origin * self._sdf_scale - 1.0)
         self.prev: np.ndarray | None = None
         self._base_scale: float | None = None
         self._rng = np.random.default_rng(1)
@@ -441,15 +572,26 @@ class ShapeFitter:
         enough to backpropagate through.
         """
         K = p.shape[0]
-        tx, ty, th, sx, sy = p[:, 0], p[:, 1], p[:, 2], p[:, 3], p[:, 4]
-        v = obs[None] - torch.stack([tx, ty], 1)[:, None, :]
-        c, s = torch.cos(-th)[:, None], torch.sin(-th)[:, None]
-        x = c * v[..., 0] - s * v[..., 1]
-        y = s * v[..., 0] + c * v[..., 1]
-        local = torch.stack([x / sx[:, None], y / sy[:, None]], dim=-1)
+        # The inverse of the pose, as one matrix. Written out, this is
+        # diag(1/sx, 1/sy) @ R(-theta), whose entries are the rotation's
+        # divided by the scales -- so it costs four divisions and a stack
+        # rather than a chain of indexed multiplies. This function was 104
+        # operator dispatches an iteration, a quarter of the whole forward
+        # pass, for arithmetic on a few hundred points.
+        th = p[:, 2]
+        c, s = torch.cos(th), torch.sin(th)
+        isx, isy = 1.0 / p[:, 3], 1.0 / p[:, 4]
+        Ainv = torch.stack([c * isx, s * isx, -s * isy, c * isy],
+                           dim=-1).view(K, 2, 2)
+        v = obs[None] - p[:, None, :2]
+        local = v @ Ainv.transpose(1, 2)
 
-        g = (local - self.sdf_origin) / self.sdf_spacing
-        g = 2.0 * g / (self.sdf_res - 1) - 1.0
+        # Template units -> grid coordinates, folded into one multiply-add for
+        # the same reason as in _sample.
+        gscale = 2.0 / (self.sdf_spacing * (self.sdf_res - 1))
+        g = torch.addcmul(self._sdf_shift, local, self._sdf_scale) \
+            if self._sdf_scale is not None else \
+            (local - self.sdf_origin) * gscale - 1.0
         # Same flattening as _sample, for the same reason: no stride-0 batch.
         d = F.grid_sample(self.sdf, g.reshape(1, -1, 1, 2), mode="bilinear",
                           padding_mode="border", align_corners=True).reshape(K, -1)
@@ -510,8 +652,7 @@ class ShapeFitter:
             sub = np.ascontiguousarray(mask[y0:y1, x0:x1])
             sub_signal = (None if signal is None
                           else np.ascontiguousarray(signal[y0:y1, x0:x1]))
-            off = torch.tensor([float(x0), float(y0)],
-                               device=self.dev.torch_device)
+            off = (x0, y0)
             if sub.sum() < 10:
                 # The robot left the window -- an abrupt jump, or a lost track.
                 # Fall back to the whole frame rather than reporting nothing.
@@ -528,6 +669,8 @@ class ShapeFitter:
             Dfeat = distance_field(sub, self.dev,
                                    extra_edges=interior_edges(sub_signal, sub))
         S = soft_mask(sub, self.dev)
+        # One set of pixel->grid constants for every sample this frame makes.
+        ns = sampler(D, off)
         self.timings["fields"] += time.perf_counter() - _t0
         _t0 = time.perf_counter()
         n_k = cfg.n_restarts_warm if warm else cfg.n_restarts
@@ -541,7 +684,7 @@ class ShapeFitter:
             xs, ys = xs[sel], ys[sel]
         obs = torch.from_numpy(np.stack([xs + ox, ys + oy], 1).astype(np.float32)
                                ).to(self.dev.torch_device)
-        opt = torch.optim.Adam([p], lr=cfg.lr)
+        opt = _Adam(p, cfg.lr)
 
         # Scales live in log space during optimization so they cannot go
         # negative and so a 2x growth and a 2x shrink are equally reachable.
@@ -579,10 +722,11 @@ class ShapeFitter:
         best_seen = float("inf")
         quiet = 0
         for it in range(n_iter):
-            opt.zero_grad(set_to_none=True)
+            opt.zero_grad()
             tau2 = float(taus[it]) ** 2
-            q = _transform(self.pts, p)
-            d = _sample(D, q, off)
+            q, out = _transform_and_offset(self.pts, self.nrm, p,
+                                           cfg.contain_offset_px)
+            d = _sample(D, q, ns)
             rho = (d * d) / (d * d + tau2)          # bounded, saturates at 1
             loss = rho.mean(dim=1)
 
@@ -593,7 +737,7 @@ class ShapeFitter:
                 # little wrong has nothing to correct it. Interior edges make the
                 # fit over-determined, which is what lets the threshold be tight.
                 qf = _transform(self.feat, p)
-                df = _sample(Dfeat, qf, off)
+                df = _sample(Dfeat, qf, ns)
                 rf = ((df * df) / (df * df + tau2)).mean(dim=1)
                 loss = (loss + cfg.feature_weight * rf) / (1.0 + cfg.feature_weight)
 
@@ -607,8 +751,7 @@ class ShapeFitter:
             # trigger this penalty. Chamfer distance alone cannot distinguish
             # "correctly fitted" from "shrunk onto a subset of the edges" --
             # both put template points on real edges. This term can.
-            out = q + cfg.contain_offset_px * _rotate(self.nrm, p[:, 2])
-            loss = loss + cfg.contain_weight * _sample(S, out, off).mean(dim=1)
+            loss = loss + cfg.contain_weight * _sample(S, out, ns).mean(dim=1)
             loss = loss + cfg.coverage_weight * self._coverage(obs, p)
 
             # Width held to the drawing. Quadratic rather than bounded on
@@ -643,9 +786,9 @@ class ShapeFitter:
                         # converged under a wider kernel than it would have had.
                         taus_tail = float(cfg.tau_final_px)
                         for _ in range(2):
-                            opt.zero_grad(set_to_none=True)
+                            opt.zero_grad()
                             q = _transform(self.pts, p)
-                            d = _sample(D, q, off)
+                            d = _sample(D, q, ns)
                             l2 = ((d * d) / (d * d + taus_tail ** 2)).mean(dim=1)
                             l2.sum().backward()
                             opt.step()
@@ -655,19 +798,19 @@ class ShapeFitter:
                 best_seen = min(best_seen, cur)
 
         with torch.no_grad():
-            q = _transform(self.pts, p)
-            d = _sample(D, q, off)
+            q, out = _transform_and_offset(self.pts, self.nrm, p,
+                                           cfg.contain_offset_px)
+            d = _sample(D, q, ns)
             # Selection and the reported cost use the *final* kernel and no prior,
             # so the number written to the CSV measures agreement with the image
             # alone and is comparable across frames.
             tau2 = cfg.tau_final_px ** 2
-            out = q + cfg.contain_offset_px * _rotate(self.nrm, p[:, 2])
-            contain = _sample(S, out, off).mean(dim=1)
+            contain = _sample(S, out, ns).mean(dim=1)
             cover = self._coverage(obs, p)
             edge = ((d * d) / (d * d + tau2)).mean(dim=1)
             d_all = d
             if self.feat is not None and cfg.feature_weight > 0:
-                df = _sample(Dfeat, _transform(self.feat, p), off)
+                df = _sample(Dfeat, _transform(self.feat, p), ns)
                 rf = ((df * df) / (df * df + tau2)).mean(dim=1)
                 edge = (edge + cfg.feature_weight * rf) / (1.0 + cfg.feature_weight)
                 d_all = torch.cat([d, df], dim=1)
