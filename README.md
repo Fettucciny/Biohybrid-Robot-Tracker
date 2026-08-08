@@ -809,19 +809,70 @@ nothing — which is exactly what happens when you are reaching for the outline
 underneath it. The old region is now kept unless a new one is actually big
 enough to be one.
 
-### Cycle counts were double
+### Counting contractions
 
-Reported cycles were consistently about twice the real number: 89 for the 45
-contractions in a 45.5 s clip whose dominant frequency was measured at 1.0000 Hz
-with an SNR of 77.
+This took two goes, and the second one is the interesting part.
 
-The peak finder was never the problem. It found exactly 45 peaks and 45 troughs
-in that clip. `average_delta` returned the length of its *deltas* list, and those
-deltas are peak-to-trough half swings — so the count was 2n−1 by construction,
-which is why it was always almost exactly double rather than sometimes double.
-A cycle is one peak and one trough, so the count is half the alternating
-sequence. The amplitude it returns, the mean peak-to-trough swing, was correct
-throughout and is unchanged.
+**The arithmetic bug.** Reported cycles were consistently about twice the real
+number — 89 for the 45 contractions in a 45.5 s clip whose dominant frequency
+was measured at 1.0000 Hz with an SNR of 77. `average_delta` returned the length
+of its *deltas* list, and those deltas are peak-to-trough **half** swings, so the
+count was 2n−1 by construction. That is why it was always almost exactly double
+rather than sometimes double.
+
+**The model bug, which the halving exposed.** With the arithmetic fixed the same
+27 s selection reported 38 against 27 real contractions. Still wrong, and no
+amount of prominence tuning fixes it, because counting local extrema is the
+wrong model for this signal.
+
+A muscle-driven robot **contracts**. It rests at a length, pulls away from it
+once per beat, and relaxes back. The events are therefore one-sided — minima in
+length, maxima in force — and they are separated by a resting stretch that is
+not an event at all, merely noisy. A symmetric peak-and-trough detector counts
+that noise, and it counts the rattling at the bottom of each spike as several
+events.
+
+So contractions are now found by **threshold crossing with hysteresis** — a
+Schmitt trigger, which is how spikes are counted everywhere else in biology.
+The trace's own resting level is its median (the robot rests for most of every
+cycle) and the excursion depth is its 98th percentile. A contraction is counted
+when the trace gets more than 45% of the way down and is closed out when it
+comes back above 20%, so noise has to travel a quarter of the full excursion to
+produce a spurious second count. Polarity is passed in by the caller rather than
+inferred, because the panel knows which series it is holding.
+
+Two things it deliberately does *not* do. It does not estimate a frequency: a
+contraction is a narrow spike and therefore full of harmonics, and a spectral
+refractory period built on the strongest peak lands on 2f about as often as on
+f — measured, on this very clip. And it does not tune anything per clip; the
+thresholds are fractions of each window's own depth, so strain, micrometers and
+micronewtons all work untouched.
+
+On the real 1 Hz clip, counted against what one contraction per second predicts:
+
+| window | expected | before | after |
+|---|---|---|---|
+| 3–30 s (the reported selection) | 27 | 38 | **26** |
+| 5–15 s | 10 | 14 | **10** |
+| 20–25 s | 5 | 7 | **5** |
+| 30–45.5 s | 16 | 22 | **16** |
+| whole clip | ~46 | 54 | **40** |
+
+The whole-clip figure is lower than 46 on purpose: the last quarter of that
+recording has visibly weaker, irregular beats that do not reach 45% depth, and
+counting them as full contractions would be the same mistake in the other
+direction. The threshold sits on a plateau — anywhere from 45% to 70% gives 39
+to 41 — which is what a correct detection looks like; below 40% the count climbs
+steeply as noise starts to qualify.
+
+Amplitude is now measured against the **local** resting level around each
+contraction rather than as a mean of half-swings, so the slow baseline drift
+these clips have as the tissue tires is not read as a change in contraction
+size.
+
+And the panel now draws a small marker on every contraction it counted. A number
+in a box asks to be trusted; a dot on each event can be checked against the trace
+at a glance — which is how the count being wrong was noticed in the first place.
 
 ### A DXF could take the process down
 

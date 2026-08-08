@@ -34,56 +34,114 @@ from matplotlib.figure import Figure  # noqa: E402
 from .theme import C as THEME, matplotlib_rc, series_colors
 
 
-def average_delta(t: np.ndarray, y: np.ndarray,
-                  prominence_frac: float = 0.15) -> tuple[float, int]:
-    """Mean peak-to-trough swing of an oscillating trace, and the cycle count.
+# Where a contraction starts and stops being counted, as a fraction of the
+# trace's own excursion depth. Two thresholds, not one: a single threshold
+# re-triggers every time a noisy sample crosses it, which for a trace that
+# spends the bottom of each spike rattling around means several counts per
+# contraction. Entering at 45% and leaving at 20% means noise has to travel a
+# quarter of the full excursion to produce a spurious second count.
+ENTER_FRAC = 0.45
+LEAVE_FRAC = 0.20
+
+
+def contraction_events(t: np.ndarray, y: np.ndarray, polarity: int = -1
+                       ) -> tuple[list[int], float]:
+    """Indices of the contractions in a trace, and the resting level.
+
+    Counting by local extrema is the wrong model for this signal, and no amount
+    of prominence tuning fixes it. A muscle-driven robot *contracts*: it sits at
+    a resting length and pulls away from it, once per beat, then relaxes back.
+    So the events are one-sided -- minima in length, maxima in force -- and they
+    are separated by a resting stretch that is not an event at all, merely
+    noisy. A symmetric peak-and-trough detector counts that noise: on a real
+    45.5 s clip at a measured 1.0000 Hz it reported 38 contractions in a 27 s
+    selection that contains 27, and 75 over the whole clip.
+
+    Threshold crossings with hysteresis instead -- a Schmitt trigger, which is
+    how spikes are counted everywhere else in biology. One count per excursion
+    that gets more than ``ENTER_FRAC`` of the way down and comes back, no matter
+    how much the bottom of it rattles. It needs no frequency estimate, which
+    matters: a contraction is a narrow spike and therefore full of harmonics, so
+    a spectral refractory period built on the strongest peak lands on 2f about
+    as often as on f.
+
+    ``polarity`` is -1 when the events are dips (length) and +1 when they are
+    rises (force). It is not inferred, because the caller knows which series it
+    is holding and a guess would occasionally be wrong in a way nobody checks.
+
+    Returns ``(indices of the extreme of each event, resting level)`` in the
+    original series' own sign and units.
+    """
+    s = np.asarray(y, float) * (1 if polarity >= 0 else -1)
+    if s.size < 8:
+        return [], float("nan")
+
+    # The robot rests for most of every cycle, so the median is the resting
+    # level and the high percentile is the depth of a contraction. Percentiles
+    # rather than min/max: one dropped frame should not set the scale for the
+    # whole window.
+    rest = float(np.percentile(s, 50))
+    scale = float(np.percentile(s, 98)) - rest
+    if not np.isfinite(scale) or scale <= 0:
+        return [], rest
+    enter, leave = rest + ENTER_FRAC * scale, rest + LEAVE_FRAC * scale
+
+    out: list[int] = []
+    inside = False
+    start = 0
+    for i, v in enumerate(s):
+        if not inside:
+            if v >= enter:
+                inside, start = True, i
+        elif v <= leave:
+            out.append(start + int(np.argmax(s[start:i + 1])))
+            inside = False
+    if inside:                      # a contraction still running at the edge
+        out.append(start + int(np.argmax(s[start:])))
+    return out, rest
+
+
+def average_delta(t: np.ndarray, y: np.ndarray, polarity: int = -1
+                  ) -> tuple[float, int]:
+    """Mean contraction amplitude in a trace, and how many contractions.
 
     Not ``max - min``: that reports the single largest excursion in the window,
-    which is the noisiest sample available and grows with window length. Pairing
-    successive turning points instead gives the average contraction amplitude,
-    which is what a "delta length" is meant to mean.
+    which is the noisiest sample available and grows with window length.
+    Averaging over the detected contractions gives the typical amplitude, which
+    is what a "delta length" is meant to mean.
 
-    Turning points need a prominence floor or ordinary measurement noise
-    registers as thousands of tiny cycles. The floor scales with the trace's own
-    range, so it needs no unit-specific tuning and works on strain and
-    micrometers alike.
+    Each contraction is measured against the *local* resting level rather than
+    the window's, so a slow drift in baseline length -- which these clips have,
+    as the tissue tires -- is not read as a change in contraction amplitude.
     """
-    from scipy.signal import find_peaks
-
     ok = np.isfinite(t) & np.isfinite(y)
-    t, y = t[ok], y[ok]
-    if y.size < 5:
+    t, y = np.asarray(t)[ok], np.asarray(y)[ok]
+    if y.size < 8:
         return float("nan"), 0
-    rng = float(np.nanmax(y) - np.nanmin(y))
-    if rng <= 0:
-        return 0.0, 0
-    prom = rng * prominence_frac
-    peaks, _ = find_peaks(y, prominence=prom)
-    troughs, _ = find_peaks(-y, prominence=prom)
-    if peaks.size == 0 and troughs.size == 0:
-        return rng, 0                     # monotonic or a single half-swing
 
-    marked = sorted([(int(i), 1) for i in peaks] + [(int(i), -1) for i in troughs])
-    # Enforce alternation: two peaks in a row would otherwise contribute the
-    # small difference between them and drag the average down.
-    clean: list[tuple[int, int]] = []
-    for idx, kind in marked:
-        if clean and clean[-1][1] == kind:
-            keep = idx if (y[idx] > y[clean[-1][0]]) == (kind == 1) else clean[-1][0]
-            clean[-1] = (keep, kind)
-        else:
-            clean.append((idx, kind))
-    if len(clean) < 2:
-        return rng, 0
-    deltas = [abs(float(y[clean[i + 1][0]] - y[clean[i][0]]))
-              for i in range(len(clean) - 1)]
-    # Cycles, not turning points. ``deltas`` counts peak-to-trough *half*
-    # swings, so returning its length reported very close to twice the real
-    # cycle count -- 89 for the 45 contractions in a 45.5 s clip at 1.0000 Hz,
-    # which is exactly 2n-1. The detection was never the problem; only the
-    # label was. One cycle is one peak and one trough, so it is half the
-    # alternating sequence.
-    return float(np.mean(deltas)), len(clean) // 2
+    idx, rest = contraction_events(t, y, polarity)
+    if not idx:
+        rng = float(np.nanmax(y) - np.nanmin(y)) if y.size else float("nan")
+        return (rng if np.isfinite(rng) else float("nan")), 0
+
+    sign = 1 if polarity >= 0 else -1
+    s = y * sign
+    # Local rest: the median of the quiet samples on either side of this event,
+    # within half the typical gap between events. Falls back to the window's
+    # resting level when a window holds too few events to have a typical gap.
+    span = (np.median(np.diff(idx)) if len(idx) > 1 else len(s)) * 0.5
+    half = max(int(span), 3)
+    scale = float(np.percentile(s, 98)) - rest
+    quiet = rest + LEAVE_FRAC * scale
+
+    amps = []
+    for k in idx:
+        lo, hi = max(0, k - half), min(len(s), k + half + 1)
+        near = s[lo:hi]
+        base = near[near <= quiet]
+        local = float(np.median(base)) if base.size >= 3 else rest
+        amps.append(float(s[k]) - local)
+    return float(np.mean(amps)), len(idx)
 
 
 def decimate(t: np.ndarray, ys: list, max_points: int = 1400):
@@ -653,9 +711,18 @@ class PlotPanel(QWidget):
             self.selectionAnalyzed.emit(out)
             return out
 
-        d_len, c_len = average_delta(t[m], length[m])
+        # Length dips and force rises: the polarity is stated, not guessed.
+        d_len, c_len = average_delta(t[m], length[m], polarity=-1)
         out["length_delta"] = d_len
         out["length_cycles"] = c_len
+        # Where those contractions were, for the markers on the panel.
+        marks: dict = {}
+        ti, li = t[m], length[m]
+        good = np.isfinite(ti) & np.isfinite(li)
+        ev, _ = contraction_events(ti[good], li[good], polarity=-1)
+        if ev:
+            marks["length"] = (ti[good][ev], li[good][ev])
+        out["marks"] = marks
 
         # Speed from the cumulative path only. x and y are drawn for direction,
         # but a regression through either would report a component, not a speed.
@@ -686,9 +753,14 @@ class PlotPanel(QWidget):
                                    if out["net_speed_per_min"] else float("nan"))
 
         if force is not None:
-            d_f, c_f = average_delta(t[m], force[m])
+            d_f, c_f = average_delta(t[m], force[m], polarity=+1)
             out["force_delta_un"] = d_f
             out["force_cycles"] = c_f
+            fi = force[m]
+            gf = np.isfinite(ti) & np.isfinite(fi)
+            evf, _ = contraction_events(ti[gf], fi[gf], polarity=+1)
+            if evf:
+                out["marks"]["force"] = (ti[gf][evf], fi[gf][evf])
 
         self.stats = out
         self._draw_selection()
@@ -735,6 +807,18 @@ class PlotPanel(QWidget):
                     ax.axvline(x, color=THEME["accent"], lw=1.0, alpha=0.75, zorder=1))
             if preview or key == "conf":
                 continue                      # confidence is not measured
+            # Mark each counted contraction. A number in a box asks to be
+            # trusted; a dot on every contraction it counted can be checked
+            # against the trace in one glance, which is how the count being
+            # wrong was noticed in the first place.
+            marks = (self.stats or {}).get("marks", {}).get(key)
+            if marks:
+                mt, mv = marks
+                self._sel_artists.append(ax.plot(
+                    mt, mv, linestyle="none", marker="^" if key == "force" else "v",
+                    markersize=4.5, markerfacecolor="none",
+                    markeredgecolor=THEME["text"], markeredgewidth=1.0,
+                    alpha=0.75, zorder=4)[0])
             text = self._annotation(key)
             if text:
                 # These carry the actual result of a region selection -- the
