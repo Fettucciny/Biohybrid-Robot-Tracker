@@ -22,7 +22,8 @@ import cv2
 import numpy as np
 import torch
 
-from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (QEvent, QObject, QSize, Qt, QThread, QTimer,
+                            Signal)
 from PySide6.QtGui import (QColor, QIcon, QImage, QPainter, QPen,
                            QPixmap)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
@@ -53,7 +54,7 @@ from .segment import (ColorModel, SegmentConfig, build_background,
                       choose_color_model, largest_component, segment_color_d,
                       segment_frame)
 from .shape import measure_mask
-from .theme import (ACCENT, C, Card, HelpBadge, apply as apply_theme,
+from .theme import (ACCENT, C, Card, HelpBadge, apply as apply_theme, glyph,
                     set_mode as set_theme_mode, style_chip)
 from .updater_ui import UpdateDialog
 
@@ -611,6 +612,15 @@ class MainWindow(QMainWindow):
         # the mode filter runs and does not get un-hidden by it.
         self._restore_sections()
         self._wire_persistence()
+        # Which code is actually running. An update that applies but never
+        # takes effect is invisible without this, and that is precisely the
+        # failure that went unnoticed for three releases.
+        try:
+            act = U.active_overlay_path()
+            self._log(f"running {U.current_version()}"
+                      + (f" from patch {act.name}" if act else " as installed"))
+        except Exception:
+            pass
         U.mark_overlay_verified()       # this build imports; trust the overlay
         QTimer.singleShot(0, self._after_show)
 
@@ -680,27 +690,53 @@ class MainWindow(QMainWindow):
                   self.chip_version):
             lay.addWidget(c)
 
-        # Two small toggles, in the order the eye reads them: what is shown,
-        # then how it looks. Both are one click and both are remembered.
-        self.btn_mode = QPushButton("")
+        # Three icon buttons. Square, same size, no labels: the header carries
+        # five status chips already and three words of chrome beside them read
+        # as more information to parse. Each keeps its tooltip, and the tooltip
+        # is a sentence rather than a repeat of the removed word -- an icon
+        # needs to be explainable, not merely named.
+        self.btn_mode = QPushButton()
         self.btn_mode.setObjectName("Ghost")
-        self.btn_mode.setFixedWidth(78)
+        self.btn_mode.setFixedSize(34, 30)
+        self.btn_mode.setIconSize(QSize(17, 17))
         self.btn_mode.clicked.connect(self._toggle_ui_mode)
         lay.addWidget(self.btn_mode)
 
-        self.btn_theme = QPushButton("")
+        self.btn_theme = QPushButton()
         self.btn_theme.setObjectName("Ghost")
-        self.btn_theme.setFixedWidth(64)
+        self.btn_theme.setFixedSize(34, 30)
+        self.btn_theme.setIconSize(QSize(17, 17))
         self.btn_theme.clicked.connect(self._toggle_theme)
         self._sync_theme_button()
         lay.addWidget(self.btn_theme)
 
-        self.btn_update = QPushButton("Update")
+        self.btn_update = QPushButton()
         self.btn_update.setObjectName("Ghost")
+        # Height fixed, width free: this one grows a version number beside its
+        # icon when a release is waiting.
+        self.btn_update.setFixedHeight(30)
+        self.btn_update.setMinimumWidth(34)
+        self.btn_update.setIconSize(QSize(17, 17))
         self.btn_update.setToolTip("Check for and install a new version")
         self.btn_update.clicked.connect(lambda: self._check_updates(quiet=False))
         lay.addWidget(self.btn_update)
+        self._sync_header_icons()
         return h
+
+    def _sync_header_icons(self):
+        """Repaint the header icons in the current theme's text colour.
+
+        Icons are pixmaps, so unlike everything else in the window they are not
+        reached by a stylesheet change. A switch to light mode would otherwise
+        leave three near-white glyphs on a white strip.
+        """
+        light = self.state.get("theme_mode", "dark") == "light"
+        col = C["text"]
+        # Each icon shows the state you would be *in* after pressing it, which
+        # is the convention every OS uses for these two toggles.
+        self.btn_theme.setIcon(glyph("moon" if light else "sun", col))
+        self.btn_mode.setIcon(glyph("sliders" if self.ui_mode == "simple" else "list", col))
+        self.btn_update.setIcon(glyph("download", col))
 
     # ---- sidebar ---------------------------------------------------------
 
@@ -1027,7 +1063,7 @@ class MainWindow(QMainWindow):
         ra2.setContentsMargins(0, 0, 0, 0); ra2.setSpacing(7)
         ra2.addWidget(self.chk_appearance); ra2.addWidget(HelpBadge(HELP["appearance"]))
         ra2.addStretch(1)
-        c.add_widget(rowa2, advanced=True)
+        c.add_widget(rowa2)
 
         self.btn_roi_clear = QPushButton("Clear region")
         self.btn_roi_clear.setObjectName("Ghost")
@@ -1035,7 +1071,10 @@ class MainWindow(QMainWindow):
         c.add_widget(self.btn_roi_clear)
 
         # -------------------------------------------------- analysis
-        c = cards["analysis"] = Card("Analysis", key="analysis")
+        # Advanced as a whole: everything in it is post-processing of a
+        # finished series rather than a decision about how to measure, and the
+        # defaults are right for any clip the tracker can follow.
+        c = cards["analysis"] = Card("Analysis", key="analysis", advanced=True)
         self.spin_smooth = QDoubleSpinBox(); self.spin_smooth.setRange(0, 2000)
         self.spin_smooth.setValue(100); self.spin_smooth.setSuffix(" ms")
         c.add_row("Smoothing", self.spin_smooth, HELP["smoothing"])
@@ -1154,7 +1193,8 @@ class MainWindow(QMainWindow):
         advanced = self.ui_mode == "advanced"
         for card in self.cards.values():
             card.setVisible(card.set_show_advanced(advanced))
-        self.btn_mode.setText("Advanced" if advanced else "Simple")
+        if hasattr(self, "btn_update"):
+            self._sync_header_icons()
         self.btn_mode.setToolTip(
             "Showing every control, including the solver's own settings. "
             "Click for the short list." if advanced else
@@ -2447,13 +2487,10 @@ class MainWindow(QMainWindow):
 
     def _sync_theme_button(self):
         light = self.state.get("theme_mode", "dark") == "light"
-        # A word rather than a sun/moon glyph: those characters are not in every
-        # Windows UI font and fall back to a box or the wrong shape, and the
-        # button is the one control whose whole job is to be legible.
-        # The label names what pressing it gives you, not what you are in.
-        self.btn_theme.setText("Dark" if light else "Light")
         self.btn_theme.setToolTip("Switch to dark mode" if light else
                                   "Switch to light mode")
+        if hasattr(self, "btn_update"):
+            self._sync_header_icons()
 
     def _toggle_theme(self):
         mode = "light" if self.state.get("theme_mode", "dark") == "dark" else "dark"
@@ -2534,7 +2571,7 @@ class MainWindow(QMainWindow):
             return
         self._pending_release = rel
         self._log(f"update available: {rel.version} — press Update to install it.")
-        self.btn_update.setText(f"Update  {rel.version}")
+        self.btn_update.setText(f" {rel.version}")
         self.btn_update.setToolTip(
             f"Version {rel.version} is available. Click to review and install it.")
         self._start_update_pulse()
@@ -2586,11 +2623,24 @@ class MainWindow(QMainWindow):
         try:
             U.relaunch()
         except Exception as exc:
-            QMessageBox.warning(
-                self, "Restart",
-                f"The update is installed but robotrack could not restart itself:\n\n"
-                f"{exc}\n\nClose and reopen it.")
+            # The update is on disk and will be used at the next launch. Say
+            # that first: the previous wording led with the failure, and the
+            # one thing the user needed to know -- that closing and reopening
+            # is all that is left to do -- came last.
+            QMessageBox.information(
+                self, "Restart to finish",
+                f"The update is installed and will be used the next time you "
+                f"open {APP_NAME}.\n\nIt could not restart itself just now:\n\n"
+                f"{exc}\n\nClose the window and open it again.")
+            self._log("update installed; restart could not be started "
+                      "automatically — close and reopen to use it")
             return
+        # Close the windows before quitting. quit() alone leaves any nested
+        # modal loop running, and the process then stays up beside the fresh
+        # copy it just started.
+        self._closing = True
+        self._shutdown_workers()
+        QApplication.instance().closeAllWindows()
         QApplication.instance().quit()
 
     # ---- actions ---------------------------------------------------------

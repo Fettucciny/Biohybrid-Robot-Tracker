@@ -57,6 +57,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass, asdict
 from functools import lru_cache
@@ -500,9 +501,15 @@ def apply_code_update(zip_path: Path, rel: Release) -> Path:
     staging.rename(final)
 
     state = read_state()
+    # Never record the incoming version as its own predecessor. Installing the
+    # same release twice -- which is exactly what someone does when the first
+    # attempt appears to have done nothing -- otherwise left previous_overlay
+    # pointing at the new version, and rollback then "reverted" to the thing it
+    # was reverting from.
+    prior = state.get("active_overlay", "")
     state.update(active_overlay=rel.version,
                  channel_version=rel.version,
-                 previous_overlay=state.get("active_overlay", ""),
+                 previous_overlay=("" if prior == rel.version else prior),
                  applied_from=rel.url,
                  kind="code")
     state.pop("quarantined", None)
@@ -647,12 +654,34 @@ def relaunch() -> None:
     """Start a fresh copy and let this one exit.
 
     Deliberately not os.execv: on Windows that keeps the original process handle
-    and confuses Qt's cleanup. A detached child plus a clean exit is predictable.
+    and confuses Qt's cleanup. A fresh child plus a clean exit is predictable.
+
+    No DETACHED_PROCESS. A child outlives its parent on Windows anyway, so the
+    flag bought nothing, and it is the documented way to give a process no
+    console at all -- which a frozen GUI build does not always survive being
+    started with. The observed symptom was the whole update appearing to do
+    nothing: the patch applied correctly, the restart never happened, and the
+    program carried on as the old version with no message.
+
+    Raises rather than returning quietly if the child does not come up, so the
+    caller can say so instead of leaving the user to infer it.
     """
-    creation = getattr(subprocess, "DETACHED_PROCESS", 0) | \
-        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen(relaunch_command(), close_fds=True,
-                     cwd=str(install_dir()), creationflags=creation)
+    creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    cmd = relaunch_command()
+    try:
+        proc = subprocess.Popen(cmd, close_fds=True, cwd=str(install_dir()),
+                                creationflags=creation)
+    except OSError as exc:
+        raise UpdateError(f"Could not start a new copy:\n\n{' '.join(cmd)}\n\n{exc}") from exc
+    # Give it a moment and check it is still alive. A child that exits
+    # immediately -- a missing runtime, a blocked executable -- is otherwise
+    # indistinguishable from a successful restart right up until the old
+    # window stays on screen.
+    time.sleep(0.7)
+    if proc.poll() not in (None, 0):
+        raise UpdateError(
+            f"A new copy started and exited immediately (code {proc.returncode}).\n\n"
+            f"{' '.join(cmd)}")
 
 
 # ---------------------------------------------------------------------------

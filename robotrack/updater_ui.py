@@ -16,7 +16,7 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QProgressBar,
                                QPushButton, QTextEdit, QVBoxLayout, QWidget)
@@ -210,19 +210,13 @@ class UpdateDialog(QDialog):
             return
 
         rel = self._rel
+        installed = False
         try:
             if rel.is_code:
                 U.apply_code_update(Path(path), rel)
-                self.lbl_status.setText(
-                    f"Version {rel.version} installed. Restarting …")
-                self.accept()
-                self.relaunchRequested.emit()
             else:
                 U.apply_full_update(Path(path))
-                self.lbl_status.setText(
-                    "The installer is running. robotrack will close and reopen.")
-                self.accept()
-                self.relaunchRequested.emit()
+            installed = True
         except U.UpdateError as exc:
             self.btn_install.setEnabled(True)
             QMessageBox.critical(self, "Update", str(exc))
@@ -232,3 +226,18 @@ class UpdateDialog(QDialog):
         finally:
             if rel.is_code:
                 Path(path).unlink(missing_ok=True)
+        if not installed:
+            return
+
+        # Installing and restarting are two separate outcomes, and conflating
+        # them is what made a working update look like a broken one: the patch
+        # landed correctly every time, the self-restart quietly did not, and the
+        # program carried on as the old version with nothing said. Now the
+        # install is reported on its own terms, and the restart is an attempt
+        # made afterwards whose failure is only an inconvenience.
+        self.lbl_status.setText(f"Version {rel.version} installed.")
+        self.accept()
+        # Queued rather than called from inside this slot: the dialog is still
+        # unwinding its own modal loop here, and quitting the application from
+        # underneath it does not reliably take.
+        QTimer.singleShot(0, self.relaunchRequested.emit)

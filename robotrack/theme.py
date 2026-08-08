@@ -28,10 +28,12 @@ accent never has to compete with an alarm.
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 
-from PySide6.QtCore import Qt, QPoint, Signal
-from PySide6.QtGui import QCursor, QFont
+from PySide6.QtCore import Qt, QPoint, QPointF, Signal
+from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPainterPath,
+                           QPen, QPixmap, QPolygonF)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -417,6 +419,67 @@ class HelpBadge(QToolButton):
 # --------------------------------------------------------------------------
 # Layout helpers
 # --------------------------------------------------------------------------
+
+def glyph(name: str, color: str | None = None, size: int = 18) -> QIcon:
+    """A small vector icon, painted rather than looked up in a font.
+
+    Unicode symbols were the obvious route and are the wrong one here: a sun, a
+    moon and a pair of sliders are all outside the coverage of several stock
+    Windows UI fonts, and the fallback is a box or -- worse -- a colour emoji at
+    the wrong weight. These are twenty lines of QPainter, look identical on both
+    platforms, and take the theme's own colour so they stay legible when the
+    window switches between light and dark.
+
+    Drawn on a 100x100 canvas and scaled, so the same code gives a crisp icon at
+    any device pixel ratio.
+    """
+    col = QColor(color or M.TEXT)
+    px = QPixmap(size * 4, size * 4)
+    px.fill(Qt.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.scale(px.width() / 100.0, px.height() / 100.0)
+    pen = QPen(col, 8.5)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+
+    if name == "sun":                       # switch to light
+        p.drawEllipse(QPointF(50, 50), 20, 20)
+        for k in range(8):
+            a = math.radians(k * 45)
+            c, s = math.cos(a), math.sin(a)
+            p.drawLine(QPointF(50 + 30 * c, 50 + 30 * s),
+                       QPointF(50 + 40 * c, 50 + 40 * s))
+    elif name == "moon":                    # switch to dark
+        path = QPainterPath()
+        path.addEllipse(QPointF(50, 50), 32, 32)
+        bite = QPainterPath()
+        bite.addEllipse(QPointF(70, 34), 30, 30)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawPath(path.subtracted(bite))
+    elif name == "sliders":                 # advanced: every control exposed
+        for y, knob in ((28, 66), (50, 38), (72, 58)):
+            p.drawLine(QPointF(14, y), QPointF(86, y))
+            p.setBrush(col)
+            p.drawEllipse(QPointF(knob, y), 7.5, 7.5)
+            p.setBrush(Qt.NoBrush)
+    elif name == "list":                    # simple: the short list
+        for y in (30, 50, 70):
+            p.drawLine(QPointF(22, y), QPointF(84, y))
+            p.setBrush(col)
+            p.drawEllipse(QPointF(14, y), 3.6, 3.6)
+            p.setBrush(Qt.NoBrush)
+    elif name == "download":                # update
+        p.drawLine(QPointF(50, 14), QPointF(50, 60))
+        p.drawPolyline(QPolygonF([QPointF(30, 42), QPointF(50, 62), QPointF(70, 42)]))
+        p.drawPolyline(QPolygonF([QPointF(18, 74), QPointF(18, 86), QPointF(82, 86),
+                                  QPointF(82, 74)]))
+    p.end()
+    return QIcon(px)
+
 
 class Card(QFrame):
     """Titled, collapsible panel. ``body`` is a QVBoxLayout callers add rows to.

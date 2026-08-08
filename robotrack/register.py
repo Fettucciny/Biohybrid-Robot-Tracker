@@ -37,6 +37,7 @@ guarantees robustness affordable in the first place.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -356,6 +357,12 @@ class ShapeFitter:
         self._len_ref: float | None = None
         self._wid_ref: float | None = None
         self._ref_samples: list[tuple[float, float]] = []
+        # Seconds spent inside the fit, split by what is actually doing the
+        # work. "fields" is OpenCV on the CPU -- the distance transform, the
+        # blurred mask, the interior edge map. "solve" is the optimizer on
+        # whatever device is in use. Without the split, a slow run says only
+        # that fitting is slow, and the two have completely different fixes.
+        self.timings = {"fields": 0.0, "solve": 0.0}
         if self.seed_pose is not None:
             # Anchor the scale limits to the hand-placed size. Deriving them from
             # the first automatic seed instead would bound the search around
@@ -514,12 +521,15 @@ class ShapeFitter:
         # Two fields on purpose. The silhouette matches mask edges only -- adding
         # interior edges there would let the outer boundary settle onto an
         # internal one. The features match both.
+        _t0 = time.perf_counter()
         D = distance_field(sub, self.dev)
         Dfeat = D
         if self.feat is not None and sub_signal is not None and cfg.feature_weight > 0:
             Dfeat = distance_field(sub, self.dev,
                                    extra_edges=interior_edges(sub_signal, sub))
         S = soft_mask(sub, self.dev)
+        self.timings["fields"] += time.perf_counter() - _t0
+        _t0 = time.perf_counter()
         n_k = cfg.n_restarts_warm if warm else cfg.n_restarts
         p = self._candidates(sub, min(max(int(n_k), 1), cfg.n_restarts),
                              origin=(ox, oy)).requires_grad_(True)
@@ -676,6 +686,10 @@ class ShapeFitter:
             if self.feat is not None and d_all is not d:
                 feat_fit = float((d_all[k, d.shape[1]:] < cfg.inlier_px).float().mean())
 
+        # ``best`` was already read back to the host above, so the device is
+        # synchronised here and this measures elapsed work rather than the
+        # depth of an async queue.
+        self.timings["solve"] += time.perf_counter() - _t0
         pose = Pose(*[float(x) for x in best], cost=float(loss[k]), confidence=conf,
                     feature_fit=feat_fit)
         # Only carry a confident pose forward. Warm-starting from a bad fit is

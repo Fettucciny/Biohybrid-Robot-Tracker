@@ -155,6 +155,10 @@ class Result:
         n = max(len(self.table), 1)
         if total <= 0:
             return []
+        # The sub-stages are inside "fit", so they must not be counted twice
+        # in the percentages or the total.
+        top = {k: v for k, v in st.items() if not k.startswith("  ")}
+        total = sum(top.values()) or total
         parts = "  ".join(f"{k} {1000 * v / n:.0f} ms ({100 * v / total:.0f}%)"
                           for k, v in sorted(st.items(), key=lambda kv: -kv[1]))
         lines = [f"  time per frame   : {parts}",
@@ -593,7 +597,13 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
                  force_method=method, resting_length_mm=rest_mm,
                  aspect_measured=aspect_ratio, aspect_drawn=aspect_drawn,
                  stage_times={"decode+segment": t_seg, "fit": t_fit,
-                              "live preview": t_draw},
+                              "live preview": t_draw,
+                              # Inside the fit: CPU image work against device
+                              # optimisation. Only present when a drawing was
+                              # used, since markerless does neither.
+                              **({"  \u2514 fit: fields (cpu)": fitter.timings["fields"],
+                                  "  \u2514 fit: solve": fitter.timings["solve"]}
+                                 if fitter is not None else {})},
                  notes=(([trust_note] if trust_note else []) + notes))
 
     # --- outputs -------------------------------------------------------------

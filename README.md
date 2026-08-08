@@ -573,6 +573,22 @@ file, or set `ROBOTRACK_NO_SOUND=1`.
 
 ### Simple and advanced, and a sidebar you can fold up
 
+The three header toggles are icons rather than words. The strip already carries
+five status chips, and three more words of chrome beside them read as more
+information to parse. They are painted with QPainter rather than set from a font:
+a sun, a moon and a pair of sliders are all outside the coverage of several stock
+Windows UI fonts, and the fallback is a box or a colour emoji at the wrong
+weight. Each keeps a tooltip that is a sentence, not a repeat of the removed
+word — an icon has to be explainable, not merely named. The theme switch
+re-tints them, since a pixmap is the one thing in the window a stylesheet does
+not reach.
+
+Two things moved between the modes on use. The **appearance lock** is a decision
+about how to track a particular clip, so it belongs in simple mode even though
+its internals do not. The whole **Analysis** card went the other way: everything
+in it is post-processing of a finished series rather than a decision about how to
+measure.
+
 The left column has forty-odd controls and a run needs about eight of them. Two
 mechanisms narrow it, deliberately kept separate because they answer different
 questions.
@@ -994,6 +1010,49 @@ per-stage breakdown, so the next time a clip feels slow the answer is in the log
 rather than in a guess. If `decode+segment` dominates, the bottleneck is I/O or
 the frame size — try decode scale 0.5. If `fit` dominates and the device chip in
 the header says CPU only, that is the whole story.
+
+### An update that installed perfectly and never took effect
+
+Reported as "the download bar finishes and nothing happens". The updater's own
+state file on the affected machine settled it in one read:
+
+```json
+{ "active_overlay": "v0.19.0",
+  "verified_version": "v0.17.0" }
+```
+plus `overlay-unverified` holding `{"version": "v0.19.0", "attempts": 0}`.
+
+Every part of the update had worked. The patch was downloaded, verified against
+its checksum, extracted, and made active. `attempts: 0` means the program had
+never been launched since — the self-restart simply did not happen, and because
+installing and restarting were reported as one step, the successful half was
+never mentioned. From the outside it looked like the update did nothing.
+
+Three changes, in increasing order of how much they matter:
+
+`relaunch()` no longer passes `DETACHED_PROCESS`. A child outlives its parent on
+Windows regardless, so the flag bought nothing, and it is the documented way to
+start a process with no console at all — which a frozen GUI build does not
+reliably survive. It now also waits briefly and checks the child is still alive,
+so a restart that dies immediately raises instead of being indistinguishable
+from one that worked.
+
+The relaunch is requested through a queued call rather than from inside the
+dialog's own slot. The dialog is still unwinding its modal loop at that point,
+and quitting the application from underneath it does not reliably take.
+
+And — the part that actually makes this class of failure harmless — **installing
+and restarting are now two separate outcomes**. The install is reported on its
+own terms, and the restart is an attempt made afterwards whose failure says
+"the update is installed and will be used the next time you open the program;
+close the window and open it again." Every launch now also logs which patch it
+is running, so an update that applies but never takes effect can no longer be
+invisible.
+
+One related repair found in the same state file: `previous_overlay` had been set
+to the version being installed, because someone had installed the same release
+twice — which is exactly what you do when the first attempt appears to have done
+nothing. Rollback would have "reverted" to the version it was reverting from.
 
 ### Two bugs that looked like macOS problems and were not
 
