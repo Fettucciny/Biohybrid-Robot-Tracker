@@ -728,6 +728,75 @@ placement to seed the pose, and letting the template fit carry the shape. And
 the real fix is upstream: even illumination, and a medium that is not blown out
 at the frame edges, restore the separation that makes all of this automatic.
 
+### The region's checkbox governs whether it is *used*
+
+It used to control only whether the region could be edited, so unticking it left
+the region silently applied to every run — the one state where the control said
+one thing and the program did another. It still dimmed the frame, too, which was
+most of why "off" did not look like off.
+
+Now unticking takes the region out of the analysis and out of the picture, and
+keeps the drawn shape. That makes it a way to compare with and against, rather
+than a way to throw away a careful placement; the panel says "a 300 × 400 px
+region is saved but not in use". Whether it applies is stored separately from
+its shape, so a settings file can never describe a region that is in force with
+its own control unticked — including on upgrade, where an existing region is
+preserved but comes back switched off rather than silently active.
+
+### A region belongs to one clip
+
+Loading a different video used to carry the region over. A region is a box in
+one recording's own pixels, so applied to the next clip it masks a different
+scene — silently, because a plausible region produces a plausible-looking mask
+somewhere else entirely.
+
+**Next video** already cleared the hand placement for exactly this reason and
+said so in its docstring: thresholds, the drawing, the force model and the
+output folder describe the *experiment* and carry over; the fit, the placement
+and the plots describe the *clip* and do not. The region is the second kind. It
+is now cleared alongside them, by both **Next video** and **Choose video…**,
+which had been inconsistent with each other, and the log says it happened.
+
+### The plot panel could override a finished run's calibration
+
+The worst bug in this program so far, because it produced confident numbers that
+were out by a factor of a hundred rather than producing nothing.
+
+While a run is going there is no calibration yet, so the panel derives a
+stand-in from the widths measured so far and the true width you typed. That is
+reasonable — until the run finishes. The finished result carries the calibration
+the pipeline actually derived, *including the case where it derived none*, and
+the panel went on applying its own stand-in over the top.
+
+Almost always the two agree and it was invisible. In one case they do not. An
+appearance-locked run with no drawing reports width and length as **ratios near
+1.0**, not pixels, and the pipeline correctly refuses to calibrate off a ratio —
+its summary says `calibration: none -- results in px and strain`. The panel next
+to it divided a 5.78 mm true width by a median width of 1.0 "px" and got 5780
+µm/px, about a hundred times too large, then labelled its axis in micrometres
+and reported **855 mm/min** for a robot that walks micrometres a second.
+
+The live scale is now gated: once the finished table is in, the run's
+calibration is the last word, `None` included. A run with no calibration stays
+in pixels and says so, on the axis and in the region readout.
+
+### Missing force is now explained rather than shown as a missing plot
+
+The force panel could disappear when a run finished. Force is computed from
+length in millimetres, so it needs a calibration; without one the column is
+never created, the panel's layout is rebuilt without it, and a plot that was
+there during the run is simply gone afterwards. That reads as the plot breaking.
+
+Two halves. The live panel no longer claims a force plot the run cannot deliver
+— it checks for a calibration source, not just for a selected method — so the
+panel does not appear and then vanish. And the run now says why: "no force: the
+beam model needs length in millimetres and this run has no calibration. Set a
+true width, load a drawing, or enter px/mm." The same applies to a beam model
+with no geometry and a simulated-curve method with no curve loaded, both of
+which were also silent. A relative appearance run now says so too: "width and
+length are ratios, not pixels, so this run cannot be calibrated and has no
+force. Strain, frequency and the trajectory are still correct."
+
 ### The region can be turned, and adjusted after you draw it
 
 A dish is round, a well plate sits on a stage that was never quite square to the
@@ -941,6 +1010,38 @@ the whole robot**. A region that clips the ends removes the evidence, and the
 failure is silent and total — correlation stays high, tracking looks perfect,
 and the length simply does not change.
 
+### The outline drawn was not the outline measured
+
+Reported as: in markerless mode the green outline sometimes misses half the
+robot, but the length trace is smooth with no jump. The trace was right and the
+picture was wrong, which is the more dangerous way round — a visibly broken
+outline invites you to distrust good data.
+
+`largest_component` groups the robot's fragments across an occlusion gap and
+returns the grouped mask; everything measured comes from that mask, so a robot
+cut in two is measured across both halves. But the *contour* it returned was
+`max(cnts, key=contourArea)` — one fragment. Markerless runs draw that contour
+as their outline, so the drawing covered half a robot beside numbers that
+covered all of it, with nothing to indicate which was which.
+
+Measured on a synthetic robot 340 px long cut cleanly in half:
+
+| | |
+|---|---|
+| grouped mask area | 26 481 px, the whole robot |
+| measured length | 336 px, against a true 340 |
+| largest contour spans | **159 px** — what was drawn |
+| all contours span | **340 px** — what is drawn now |
+
+It fed back, too. The clip-wide body extent is learned from that contour and
+drives both the reach and the envelope that decide what counts as one robot, so
+every split frame taught the grouper a body less than half the real length —
+tightening the rule exactly when it most needed to be loose.
+
+The outline is now a list of every kept fragment's contour, largest first, and
+both draw sites take one curve or several. A CAD or appearance fit still
+produces exactly one, so nothing about those paths changes.
+
 ### Fragment grouping needs an envelope
 
 Regrouping fragments across an occlusion gap by proximity alone was tuned for a
@@ -1010,6 +1111,86 @@ per-stage breakdown, so the next time a clip feels slow the answer is in the log
 rather than in a guess. If `decode+segment` dominates, the bottleneck is I/O or
 the frame size — try decode scale 0.5. If `fit` dominates and the device chip in
 the header says CPU only, that is the whole story.
+
+### Crash while building the video background
+
+Qt aborts the process when a running `QThread` is destroyed — not an exception,
+not a dialog: `SIGABRT`, no traceback, the window simply gone. Python destroys
+one the moment its last reference goes, and every worker here was held by
+exactly one attribute, so
+
+```python
+self._loader = LoadWorker(...)     # while a load was still in flight
+```
+
+was a hard crash. Reproduced in four lines: start a QThread that sleeps, rebind
+the attribute, collect, abort — exit code 134 with the fix removed, 0 with it.
+
+The loader is the slowest worker and the only one whose message is on screen for
+its whole life, so any second load request during one — picking another clip,
+pressing Rebuild background, stepping through the video queue — landed on it.
+That is why it always read as "crashes while building the video background".
+
+Workers are now *retired* rather than dropped: the outgoing one is parked in a
+list until it finishes on its own, and its signals are cut first so a stale
+result cannot arrive after something newer has replaced it. Shutdown covers the
+parked ones too. Applied to all six worker slots, since the same rebinding
+pattern was in every one.
+
+### The restart request was being dropped in flight
+
+I had been fixing the wrong end of this. Every fix so far assumed the restart
+was *attempted* and failing; the reported symptom said otherwise — the progress
+bar reaches 100%, the update window vanishes, and then nothing at all: no
+restart, no error, no message.
+
+The dialog closed itself and then asked a queued signal to carry the restart
+request out to the main window. That request had to survive a modal loop
+unwinding, the dialog being accepted, and the last Python reference to it going
+out of scope in the caller. Silence is exactly what it looks like when it does
+not.
+
+The install result is now a *value* the dialog records and the caller reads back
+after `exec()` returns — ordinary synchronous code in the main window, after
+every loop has unwound. Nothing has to survive anything.
+
+And `_relaunch` is wrapped so it cannot fail quietly either. An exception raised
+inside a Qt slot goes to a stderr that a windowed build does not have, which is
+indistinguishable from the restart simply not happening — the same silence,
+from a different cause.
+
+### The restart now has to prove it happened
+
+The fix above was not enough, and the updater's own state file said so:
+
+```json
+{ "active_overlay": "0.26.0", "verified_version": "0.25.0" }
+```
+with `overlay-unverified` holding `{"version": "0.26.0", "attempts": 0}` — three
+releases later, the same shape as before. The patch applies; nothing restarts.
+
+Two weaker tests had both passed while the restart was in fact failing.
+``Popen`` returning means Windows accepted the command, not that the program
+ran. A liveness check a moment later means it had not died *yet* — and a frozen
+build takes several seconds to finish importing, so an app that dies during
+startup sails straight past a 0.7 s check.
+
+`attempts` is the evidence that means what it says. `verify_overlay_startup`
+runs at the very top of every launch and bumps it, so a non-zero count is proof
+that a new process got as far as running this package's own code. The restart is
+now a **handshake**: start the child, poll for its announcement for up to twenty
+seconds, and only then close anything.
+
+Three consequences, all improvements on quitting hopefully:
+
+* If the child never announces itself, this window stays open. The old
+  behaviour's worst case was closing the only working window and putting
+  nothing back.
+* The header's Update button becomes a pulsing **Restart to finish**. A dialog
+  can be dismissed unread, and it was carrying the one thing still to be done.
+* On success there is a hard-exit backstop 2.5 s after `quit()`, since `quit()`
+  only unwinds the loop it was called from and a stray modal loop would leave
+  the old process alive beside its replacement.
 
 ### An update that installed perfectly and never took effect
 

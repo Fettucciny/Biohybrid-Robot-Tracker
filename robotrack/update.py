@@ -638,6 +638,18 @@ def apply_full_update(path: Path) -> None:
     raise UpdateError(f"Full updates are not supported on {sys.platform}.")
 
 
+def launch_diagnostics() -> str:
+    """Everything that decides how a restart is attempted, on one line.
+
+    Written to the log before the attempt so a failure is diagnosable from what
+    the user already has, rather than from a guess about their machine.
+    """
+    return (f"frozen={is_frozen()} platform={sys.platform} "
+            f"exe={sys.executable!r} cwd={str(install_dir())!r} "
+            f"bundle={str(app_bundle()) if app_bundle() else None} "
+            f"cmd={relaunch_command()}")
+
+
 def relaunch_command() -> list[str]:
     bundle = app_bundle()
     if bundle is not None:
@@ -650,8 +662,35 @@ def relaunch_command() -> list[str]:
     return [sys.executable, "-m", "robotrack.gui"]
 
 
-def relaunch() -> None:
-    """Start a fresh copy and let this one exit.
+def child_started(version: str) -> bool:
+    """Has a freshly launched copy actually reached its own startup code?
+
+    This is a real handshake rather than a guess, and it exists because two
+    weaker tests both passed while the restart was in fact failing. ``Popen``
+    returning means Windows accepted the command, not that the program ran; a
+    liveness check a moment later means it had not died *yet*, and a frozen
+    build takes seconds to finish importing, so an app that dies during startup
+    sails past it.
+
+    ``verify_overlay_startup`` runs at the very top of every launch and bumps
+    the pending marker's attempt count. That count is therefore proof that a new
+    process got as far as running this package's own code -- the only evidence
+    that means what it says.
+    """
+    m = read_marker()
+    if m is not None:
+        return m[0] == version and m[1] >= 1
+    # No marker left at all means a launch got all the way to a working window
+    # and cleared it, which is the best outcome there is.
+    return read_state().get("verified_version") == version
+
+
+def relaunch():
+    """Start a fresh copy and return the child process.
+
+    The caller is expected to wait for :func:`child_started` before exiting, so
+    a restart that fails leaves the working copy on screen rather than leaving
+    the user with nothing at all.
 
     Deliberately not os.execv: on Windows that keeps the original process handle
     and confuses Qt's cleanup. A fresh child plus a clean exit is predictable.
@@ -666,22 +705,35 @@ def relaunch() -> None:
     Raises rather than returning quietly if the child does not come up, so the
     caller can say so instead of leaving the user to infer it.
     """
-    creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     cmd = relaunch_command()
+
+    # On Windows, hand a frozen build to the shell rather than spawning it as a
+    # child of a process that is about to die.
+    #
+    # A PyInstaller onedir app relaunching itself has the old instance still
+    # holding its own folder and its loaded DLLs while the new one starts out of
+    # the same directory, as a child that inherits its environment. That is the
+    # most likely reason these restarts have been dying a few seconds in, after
+    # every cheap liveness check has already passed. ``os.startfile`` asks the
+    # shell to open it instead: a fully independent process, no inherited
+    # handles, no parent-child relationship at all.
+    #
+    # It gives back no handle to poll, which used to be the reason not to use
+    # it. It is not any more -- the child announces itself through the pending
+    # marker, and that works however it was started.
+    if os.name == "nt" and is_frozen() and len(cmd) == 1:
+        try:
+            os.startfile(cmd[0])            # noqa: S606 - our own executable
+            return None
+        except OSError:
+            pass                            # fall through to the direct spawn
+
+    creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
-        proc = subprocess.Popen(cmd, close_fds=True, cwd=str(install_dir()),
+        return subprocess.Popen(cmd, close_fds=True, cwd=str(install_dir()),
                                 creationflags=creation)
     except OSError as exc:
         raise UpdateError(f"Could not start a new copy:\n\n{' '.join(cmd)}\n\n{exc}") from exc
-    # Give it a moment and check it is still alive. A child that exits
-    # immediately -- a missing runtime, a blocked executable -- is otherwise
-    # indistinguishable from a successful restart right up until the old
-    # window stays on screen.
-    time.sleep(0.7)
-    if proc.poll() not in (None, 0):
-        raise UpdateError(
-            f"A new copy started and exited immediately (code {proc.returncode}).\n\n"
-            f"{' '.join(cmd)}")
 
 
 # ---------------------------------------------------------------------------

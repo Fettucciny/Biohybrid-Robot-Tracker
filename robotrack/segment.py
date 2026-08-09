@@ -331,7 +331,10 @@ class Mask:
     t: float
     mask: np.ndarray          # uint8 {0,1}, full frame
     area_px: float
-    contour: np.ndarray | None   # (N,2) float32 outline, largest component
+    # Outlines of every kept fragment, largest first. A list, because an
+    # occluded robot has more than one and drawing only the biggest showed half
+    # a robot next to correct numbers.
+    contour: list
     frame: np.ndarray | None = None   # the decoded frame, for live overlays
     # The continuous image the mask was cut from -- color distance in color
     # mode, nothing in luma mode, where the frame itself already is it. Carried
@@ -374,7 +377,7 @@ def largest_component(mask_np: np.ndarray, min_area: float,
                       reach_px: float = 0.0, max_extent_px: float = 0.0,
                       envelope_factor: float = 0.0
                       ) -> tuple[np.ndarray, float, np.ndarray | None]:
-    """Keep the robot's blobs and return the outline.
+    """Keep the robot's blobs, and return every kept fragment's outline.
 
     An occluder splitting the robot in two is the normal case here, so this is
     deliberately not "keep the largest blob". The grouping rule is *spatial*
@@ -454,8 +457,22 @@ def largest_component(mask_np: np.ndarray, min_area: float,
     if total < min_area:
         return np.zeros_like(mask_np, np.uint8), 0.0, None
     cnts, _ = cv2.findContours(out, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    contour = max(cnts, key=cv2.contourArea).reshape(-1, 2).astype(np.float32) if cnts else None
-    return out, total, contour
+    # Every kept fragment's outline, largest first -- not just the biggest one.
+    #
+    # Returning only ``max(cnts, key=contourArea)`` was wrong in the one case
+    # this whole function exists for. When an occluder splits the robot, both
+    # halves are kept, both are in ``out``, and every measurement taken from the
+    # mask covers both. The single contour covers one. Markerless runs draw that
+    # contour as the outline, so the picture showed half a robot beside a length
+    # trace that was smooth and correct -- the drawing was incomplete, not the
+    # data, and there was no way to tell which from looking.
+    #
+    # It also fed back: the clip-wide body extent is learned from this contour,
+    # so a split frame taught the grouper a body shorter than the robot, which
+    # tightens the envelope that decides what counts as one robot.
+    contours = [c.reshape(-1, 2).astype(np.float32) for c in
+                sorted(cnts, key=cv2.contourArea, reverse=True)] if cnts else []
+    return out, total, contours
 
 
 @dataclass
@@ -545,10 +562,11 @@ class Segmenter:
         # are not analyzed with a fragment reach of zero.
         for f in samples[:: max(1, len(samples) // 12)] if len(samples) else []:
             mm = self._mask_of(f)
-            _, _, c = largest_component(mm, self.min_area)
-            if c is not None:
+            _, _, cs = largest_component(mm, self.min_area)
+            if cs:
+                pts = np.concatenate(cs)
                 self._extent_px = max(self._extent_px,
-                                      float(max(np.ptp(c[:, 0]), np.ptp(c[:, 1]))))
+                                      float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1]))))
 
     def _mask_of(self, frame: np.ndarray) -> np.ndarray:
         """Raw mask for one frame, in whichever mode is active."""
@@ -576,12 +594,15 @@ class Segmenter:
                 self._thr_history.append(self._last_thr)
                 if len(self._thr_history) == 30:
                     self._thr = float(np.median(self._thr_history))
-            mask_np, area, contour = largest_component(
+            mask_np, area, contours = largest_component(
                 mask_np, self.min_area, self.cfg.gap_factor * self._extent_px,
                 max_extent_px=self.cfg.envelope_factor * self._extent_px)
-            if contour is not None:
+            if contours:
                 # Running maximum: the clip's least-occluded view is the best
                 # available estimate of true body size, and it only grows.
-                ext = float(max(np.ptp(contour[:, 0]), np.ptp(contour[:, 1])))
+                # Across all the fragments, so a frame where the robot is cut
+                # in two teaches the right body size rather than half of it.
+                pts = np.concatenate(contours)
+                ext = float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
                 self._extent_px = max(self._extent_px, ext)
-            yield Mask(i, t, mask_np, area, contour, frame, signal)
+            yield Mask(i, t, mask_np, area, contours, frame, signal)

@@ -46,7 +46,8 @@ DEFAULTS: dict[str, Any] = {
     # Beam model, defaulting to the values in SampleForce.m
     "beam_E_kpa": 293.0,
     "beam_thickness_mm": 1.100,
-    "beam_width_mm": 3.025,
+    "beam_width_mm": 5.06,
+    "beam_slot_mm": 0.9625,         # channel through the beam, subtracted from w
     "beam_leg_to_leg_mm": 8.030,
     "beam_muscle_offset_mm": 1.238,
     "beam_leg_long_mm": 4.125,
@@ -113,6 +114,11 @@ DEFAULTS: dict[str, Any] = {
     # Four values means an upright region and is what builds before 0.17 wrote;
     # the fifth is the rotation about the region's own centre. Both are read.
     "roi": None,
+    # Whether that region is applied. Separate from the shape so switching it
+    # off is a way to compare with and without rather than a way to lose a
+    # careful placement -- and so a settings file can never describe a region
+    # that is silently in force with its own control unticked.
+    "roi_enabled": False,
     "traj_hz": 0.0,                 # trajectory sampling rate; 0 = every frame
 
     # --- updates ---------------------------------------------------------
@@ -173,6 +179,17 @@ CORRECTED: dict[str, tuple[float, float, str]] = {
         1.642, 1.238,
         "SampleForce.m was corrected; the moment arm scales force by 1/l, so "
         "the old value read about 32% low"),
+    # The beam is not solid. It is 5.06 mm wide with a 0.9625 mm channel through
+    # it, which is how the lab's force script has always computed the section;
+    # treating it as a solid 3.025 mm beam understated I by 26% and every force
+    # with it. Corrected together, since either alone is a different beam again.
+    "beam_width_mm": (
+        3.025, 5.06,
+        "the beam is 5.06 mm wide with a 0.9625 mm channel, not a solid "
+        "3.025 mm section; force scales with I, so the old value read 26% low"),
+    "beam_slot_mm": (
+        0.0, 0.9625,
+        "the channel through the beam was previously not represented at all"),
 }
 
 

@@ -289,6 +289,9 @@ class PlotPanel(QWidget):
         self.width_mm: float | None = None
         self._drag = None
         self._sel = None            # (t0, t1) of the analyzed region
+        # True once a finished run's table is in. Gates the live width-derived
+        # scale, which must never override a completed run's calibration.
+        self._final = False
         self._sel_drag = None
         self._sel_artists: list = []
         self.stats: dict = {}
@@ -379,6 +382,7 @@ class PlotPanel(QWidget):
 
     def start_live(self, um_per_px: float | None = None, has_force: bool = False,
                    width_mm: float | None = None):
+        self._final = False
         self._rows.clear()
         self.width_mm = width_mm if width_mm and width_mm > 0 else None
         self.configure(um_per_px, has_force)
@@ -386,8 +390,21 @@ class PlotPanel(QWidget):
         self._timer.start()
 
     def _live_um_per_px(self) -> float | None:
-        """Scale from the widths seen so far -- the same ruler the run uses."""
-        if not self.width_mm or not self._rows:
+        """Scale from the widths seen so far, *while a run is going*.
+
+        Strictly a stand-in for a number that does not exist yet. Once the run
+        finishes, the result carries the calibration the pipeline actually
+        derived -- including the case where it derived none -- and that is
+        authoritative. Letting this keep overriding it was badly wrong in one
+        case: an appearance-locked run with no drawing reports width and length
+        as *ratios* near 1.0, so dividing a true width by a median width of 1.0
+        px produced a scale about a hundred times too large. The run summary
+        said "calibration: none -- results in px and strain" and the panel beside
+        it confidently showed micrometres and 855 mm/min for a robot that walks
+        micrometres a second. Numbers that look real and are three hundred times
+        out are worse than no numbers.
+        """
+        if self._final or not self.width_mm or not self._rows:
             return None
         w = np.array([r.get("width_px", np.nan) for r in self._rows], float)
         w = w[np.isfinite(w) & (w > 0)]
@@ -441,14 +458,19 @@ class PlotPanel(QWidget):
         now in the viewer, and they are not.
         """
         self._timer.stop()
+        self._final = False
         self._rows = []
         self._home.clear()
         self.clear_selection()
         self._redraw()
 
     def set_table(self, df, um_per_px: float | None, has_force: bool):
-        """Replace live data with the finished, gated and smoothed table."""
+        """Replace live data with the finished, gated and smoothed table.
+
+        From here the calibration argument is the last word, ``None`` included.
+        """
         self._timer.stop()
+        self._final = True
         self.configure(um_per_px, has_force)
         cols = [c for c in ("t", "length_px", "length_strain", "force_mn",
                             "path_length", "confidence", "cx", "cy",
@@ -470,7 +492,7 @@ class PlotPanel(QWidget):
         length_px = np.array([r.get("length_px", np.nan) for r in self._rows], float)
         conf = np.array([r.get("confidence", np.nan) for r in self._rows], float)
 
-        live_k = self._live_um_per_px()
+        live_k = self._live_um_per_px()      # None once the run has finished
         if live_k and not self.um_per_px:
             # Only a rebuild changes the axis label, so adopt the derived scale
             # through configure() rather than assigning it behind the label.

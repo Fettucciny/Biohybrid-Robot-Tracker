@@ -73,6 +73,9 @@ class UpdateDialog(QDialog):
         self._on_channel_change = on_channel_change
         self._rel: U.Release | None = None
         self._worker = None
+        # Set once an update has actually been written to disk. The caller acts
+        # on it after exec() returns; see _downloaded.
+        self.installed_version = ""
 
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 16)
@@ -235,9 +238,19 @@ class UpdateDialog(QDialog):
         # program carried on as the old version with nothing said. Now the
         # install is reported on its own terms, and the restart is an attempt
         # made afterwards whose failure is only an inconvenience.
+        # Recorded on the dialog, not announced by it.
+        #
+        # This used to close the dialog and then ask a queued signal to carry
+        # the restart request out of it. That request has to survive a modal
+        # loop unwinding, a dialog being accepted, and the last Python reference
+        # to that dialog going out of scope in the caller -- and the observed
+        # behaviour was the progress bar reaching 100%, the window vanishing,
+        # and nothing at all afterwards: no restart, no error, no message. A
+        # request that can be dropped in flight is the wrong shape for the one
+        # step the whole update depends on.
+        #
+        # The caller reads this field after exec() returns, which is ordinary
+        # synchronous code in the main window, after every loop has unwound.
+        self.installed_version = rel.version
         self.lbl_status.setText(f"Version {rel.version} installed.")
         self.accept()
-        # Queued rather than called from inside this slot: the dialog is still
-        # unwinding its own modal loop here, and quitting the application from
-        # underneath it does not reliably take.
-        QTimer.singleShot(0, self.relaunchRequested.emit)

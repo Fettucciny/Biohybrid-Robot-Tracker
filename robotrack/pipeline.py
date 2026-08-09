@@ -267,6 +267,22 @@ def _fit_signal(m, seg):
     return m.frame if m.frame.ndim == 2 else cv2.cvtColor(m.frame, cv2.COLOR_BGR2GRAY)
 
 
+def _as_outlines(o) -> list:
+    """One outline or several, as a list -- so both draw sites take either.
+
+    A CAD or appearance fit produces exactly one closed curve. A markerless run
+    produces one per visible fragment, which is two whenever an occluder cuts
+    the robot in half. Normalising here keeps that difference out of the drawing
+    code.
+    """
+    if o is None:
+        return []
+    if isinstance(o, (list, tuple)):
+        return [np.asarray(c) for c in o if c is not None and len(c) > 2]
+    o = np.asarray(o)
+    return [o] if len(o) > 2 else []
+
+
 def _overlay_frame(m, rec, fitted_outline, max_px: int = 900):
     """Compose the mask contour and fitted outline onto one frame, for the GUI.
 
@@ -279,13 +295,13 @@ def _overlay_frame(m, rec, fitted_outline, max_px: int = 900):
     if img is None:
         return None
     img = (img.copy() if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
-    if m.contour is not None and len(m.contour) > 2:
-        cv2.polylines(img, [m.contour.astype(np.int32)], True, (255, 255, 255), 1,
-                      cv2.LINE_AA)
-    if fitted_outline is not None and len(fitted_outline) > 2:
+    for c in _as_outlines(getattr(m, "contour", None)):
+        cv2.polylines(img, [c.astype(np.int32)], True, (255, 255, 255), 1, cv2.LINE_AA)
+    if fitted_outline is not None and len(fitted_outline) > 0:
         conf = float(rec.get("confidence", 0.0) or 0.0)
         col = (140, 220, 90) if conf >= 0.5 else (60, 190, 250)
-        cv2.polylines(img, [fitted_outline.astype(np.int32)], True, col, 2, cv2.LINE_AA)
+        cv2.polylines(img, [c.astype(np.int32) for c in _as_outlines(fitted_outline)],
+                      True, col, 2, cv2.LINE_AA)
         cx, cy = rec.get("cx"), rec.get("cy")
         if cx is not None and np.isfinite(cx):
             cv2.circle(img, (int(cx), int(cy)), 4, col, -1, cv2.LINE_AA)
@@ -474,6 +490,17 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
             progress(m.index, info.n_frames)
         t_mark = time.time()
 
+    if fitter is not None and fitter.n_frames_fitted:
+        frac = fitter.n_at_length_cap / fitter.n_frames_fitted
+        if frac > 0.05:
+            notes.append(
+                f"{100 * frac:.0f}% of frames ended with the fitted length on its "
+                f"upper bound. The relaxed end of each contraction is being "
+                f"clipped, which shortens every deflection and under-reports "
+                f"force by about the same proportion. Raise 'Length overshoot' "
+                f"under Shape fitting, or place the outline by hand on a frame "
+                f"where the robot is fully relaxed.")
+
     t = pd.DataFrame(rows)
     if t.empty:
         raise RuntimeError("No frames were processed.")
@@ -517,6 +544,12 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         tpl.width_mm if tpl is not None else None)
     if appearance_relative:
         true_width_mm = None
+        notes.append(
+            "tracking by appearance with no reference pose: width and length "
+            "are ratios, not pixels, so this run cannot be calibrated and has "
+            "no force. Strain, frequency and the trajectory are still correct. "
+            "For absolute sizes, load a drawing or place the outline by hand on "
+            "the reference frame before running.")
     if true_width_mm and ok.any():
         w = t.loc[ok, "width_px"].to_numpy()
         width_med_px = float(np.nanmedian(w))
@@ -565,7 +598,22 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         t["force_mn"] = f_un / 1000.0
         t["deflection_um"] = deflection * 1000.0
     elif method == "beam" and not px_per_mm:
+        # Force is computed from length in millimetres. With no ruler there are
+        # no millimetres, so there is no force -- but dropping the column
+        # silently also drops the force panel, and a plot that is simply absent
+        # looks like a fault rather than a missing input.
         method = "none"
+        notes.append("no force: the beam model needs length in millimetres and "
+                     "this run has no calibration. Set a true width, load a "
+                     "drawing, or enter px/mm.")
+    elif method == "beam" and cfg.beam is None:
+        method = "none"
+        notes.append("no force: the beam model was selected but no geometry "
+                     "was supplied.")
+    elif method == "lut" and not cfg.force_lut:
+        method = "none"
+        notes.append("no force: the simulated-curve method was selected but no "
+                     "curve is loaded.")
 
     per = {}
     for col in ("length_px", "area_px"):
@@ -865,7 +913,8 @@ def _overlay(info: VideoInfo, reader: FrameReader, t: pd.DataFrame,
         if i in outlines:
             c = conf.get(i, 0.0)
             col = (0, 255, 0) if c >= 0.5 else (0, 165, 255)
-            cv2.polylines(img, [(outlines[i] * k).astype(np.int32)], True, col, 2)
+            cv2.polylines(img, [(o * k).astype(np.int32)
+                                for o in _as_outlines(outlines[i])], True, col, 2)
         L = length.get(i)
         if L is not None and np.isfinite(L):
             cv2.putText(img, f"t={ts:6.3f}s  L={L * k:6.1f}px  conf={conf.get(i, 0.0):.2f}",

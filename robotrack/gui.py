@@ -11,6 +11,7 @@ valid range, clicking opens the full explanation from paramhelp.py.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import threading
@@ -240,7 +241,7 @@ class PreviewWorker(QThread):
             # Same grouping rule the run uses. Without the envelope the preview
             # silently disagreed with the analysis: fragments merged unchecked and
             # the fitted length ran to the full frame height.
-            mask, area, contour = largest_component(
+            mask, area, contours = largest_component(
                 m, min_area, reach_px=self.seg_cfg.gap_factor * _blob_extent(m),
                 envelope_factor=self.seg_cfg.envelope_factor)
             if self.show["mask"] and mask.any():
@@ -283,9 +284,9 @@ class PreviewWorker(QThread):
             elif mask.any():
                 ms = measure_mask(mask)
                 if ms:
-                    if self.show["fit"] and contour is not None:
-                        cv2.polylines(img, [contour.astype(np.int32)], True,
-                                      OK_BGR, 2, cv2.LINE_AA)
+                    if self.show["fit"] and contours:
+                        cv2.polylines(img, [c.astype(np.int32) for c in contours],
+                                      True, OK_BGR, 2, cv2.LINE_AA)
                         cv2.circle(img, (int(ms.cx), int(ms.cy)), 5, OK_BGR, -1)
                     bits += [f"W {ms.width_px:.1f}px", f"L {ms.length_px:.1f}px"]
             self.done.emit(img, "    ".join(bits), None, fitted)
@@ -361,7 +362,7 @@ class PlaybackWorker(QThread):
                                               else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)).copy()
                 area = 0.0
                 if m is not None:
-                    mask, area, contour = largest_component(
+                    mask, area, contours = largest_component(
                         m, min_area, envelope_factor=self.seg_cfg.envelope_factor)
                     if self.show_mask and mask.any():
                         tint = np.zeros_like(img)
@@ -371,13 +372,13 @@ class PlaybackWorker(QThread):
                     # is on. It is the one thing worth watching during playback:
                     # a tracker that lets go shows it here frames before the
                     # numbers do.
-                    if contour is not None and len(contour) > 2:
+                    if contours:
                         # White reads on a photograph but disappears against the
                         # bright end of viridis, so the chroma view gets the
                         # accent instead.
                         line = _bgr(ACCENT) if self.view == "chroma" else (255, 255, 255)
-                        cv2.polylines(img, [contour.astype(np.int32)], True,
-                                      line, 2 if self.view == "chroma" else 1,
+                        cv2.polylines(img, [c.astype(np.int32) for c in contours],
+                                      True, line, 2 if self.view == "chroma" else 1,
                                       cv2.LINE_AA)
                 # Drop frames rather than fall behind: playing at the clip's real
                 # rate matters more than showing every frame.
@@ -501,6 +502,9 @@ class MainWindow(QMainWindow):
         self._queue: list = []
         self._sizes: dict = {}       # video path -> (frames, pixels), for the estimate
         self._sizer = None
+        # Workers that were replaced while still running. Held only so Python
+        # cannot destroy a live QThread; entries drop out when they finish.
+        self._retired: list = []
         self._result = None          # the finished Result, for subset export
         self.reader: FrameReader | None = None
         self.background = None
@@ -986,9 +990,10 @@ class MainWindow(QMainWindow):
             self.beam_rows.append(row)
             return w
 
-        self.spin_E = beam_row("Young's modulus", 0.1, 1e6, 293.0, 1, " kPa", "beam_E")
+        self.spin_E = beam_row("Young's modulus", 0.1, 1e6, 293.0, 2, " kPa", "beam_E")
         self.spin_t = beam_row("Beam thickness", 0.001, 100.0, 1.100, 3, " mm", "beam_geom")
-        self.spin_bw = beam_row("Beam width", 0.001, 100.0, 3.025, 3, " mm", "beam_geom")
+        self.spin_bw = beam_row("Beam width", 0.001, 100.0, 5.060, 3, " mm", "beam_geom")
+        self.spin_slot = beam_row("Beam slot width", 0.0, 100.0, 0.9625, 4, " mm", "beam_slot")
         self.spin_Lleg2leg = beam_row("Leg to leg", 0.001, 1000.0, 8.030, 3, " mm", "beam_geom")
         self.spin_arm = beam_row("Muscle offset", 0.001, 1000.0, 1.238, 3, " mm", "beam_geom")
         self.spin_leg_long = beam_row("Leg length (long)", 0.001, 1000.0, 4.125, 3, " mm", "beam_geom")
@@ -1047,7 +1052,7 @@ class MainWindow(QMainWindow):
         rule = QFrame(); rule.setObjectName("cardRule"); rule.setFixedHeight(1)
         c.add_widget(rule)
 
-        self.chk_roi = QCheckBox("Draw a region of interest")
+        self.chk_roi = QCheckBox("Limit tracking to a region")
         self.chk_roi.stateChanged.connect(self._on_roi_toggle)
         rowr = QWidget(); rr = QHBoxLayout(rowr); rr.setContentsMargins(0, 0, 0, 0); rr.setSpacing(7)
         rr.addWidget(self.chk_roi); rr.addWidget(HelpBadge(HELP["roi"]))
@@ -1380,6 +1385,7 @@ class MainWindow(QMainWindow):
                         out[path] = (n, w * h)
                 self.measured.emit(out)
 
+        self._retire("_sizer")
         self._sizer = _Sizer(self)
         self._sizer.measured.connect(self._on_sizes)
         self._sizer.start()
@@ -1559,13 +1565,7 @@ class MainWindow(QMainWindow):
         self.video = path
         self.state["last_video_dir"] = str(Path(path).parent)
         self.lbl_video.setText(Path(path).name)
-        self._last_fit_pose = None
-        self.manual_pose = None
-        self._result = None
-        self.btn_export_sel.setEnabled(False)
-        if hasattr(self, "chk_manual"):
-            self.chk_manual.setChecked(False)
-        self.plots.reset()
+        self._forget_clip_state()
         self._touch()
         self._refresh_queue()
         self._reload()
@@ -1667,7 +1667,7 @@ class MainWindow(QMainWindow):
             gap_factor=self.spin_gap.value(),
             manual_threshold=None if self.cmb_thr.currentIndex() == 0
             else float(self.spin_thr.value()),
-            roi=tuple(self.roi) if self.roi else None,
+            roi=tuple(self._active_roi() or ()) or None,
         )
 
     def _fit_cfg(self) -> FitConfig:
@@ -1730,6 +1730,7 @@ class MainWindow(QMainWindow):
             "beam_E_kpa": spin(self.spin_E),
             "beam_thickness_mm": spin(self.spin_t),
             "beam_width_mm": spin(self.spin_bw),
+            "beam_slot_mm": spin(self.spin_slot),
             "beam_leg_to_leg_mm": spin(self.spin_Lleg2leg),
             "beam_muscle_offset_mm": spin(self.spin_arm),
             "beam_leg_long_mm": spin(self.spin_leg_long),
@@ -1757,6 +1758,7 @@ class MainWindow(QMainWindow):
             "show_mask": check(self.chk_mask),
             "show_outline": check(self.chk_fit),
             "manual_placement": check(self.chk_manual),
+            "roi_enabled": check(self.chk_roi),
             "check_updates_on_start": check(self.chk_update_start),
         }
 
@@ -1852,6 +1854,43 @@ class MainWindow(QMainWindow):
     _WORKER_ATTRS = ("_player", "_matcher", "_update_check", "_sizer",
                      "_loader", "_preview", "_runner")
 
+    def _retire(self, attr: str) -> None:
+        """Let go of a worker without destroying it if it is still running.
+
+        Qt aborts the process when a running QThread is destroyed -- not an
+        exception, not a dialog, ``SIGABRT`` and no traceback. Python decides to
+        destroy one the moment the last reference goes, and every worker here is
+        held by exactly one attribute, so ``self._loader = LoadWorker(...)``
+        while a load was in flight was a hard crash. Reproduced in four lines:
+        start a QThread that sleeps, rebind the attribute, collect, abort.
+
+        That is what "it crashes while building the video background" was. The
+        loader is the slowest worker and the only one whose message is on screen
+        the whole time it runs, so any second load request during one -- picking
+        another clip, pressing Rebuild background, stepping through the queue --
+        landed on it.
+
+        The old worker is therefore parked in a list until it finishes on its
+        own, and its signals are cut first so a stale result cannot arrive after
+        something newer has replaced it.
+        """
+        w = getattr(self, attr, None)
+        if not isinstance(w, QThread):
+            return
+        for name in ("done", "note", "progress", "row", "frame", "aborted",
+                     "finished_at"):
+            sig = getattr(w, name, None)
+            if sig is not None:
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass            # nothing was connected; fine either way
+        if w.isRunning():
+            self._retired.append(w)
+            w.finished.connect(lambda w=w: self._retired.remove(w)
+                               if w in self._retired else None)
+        setattr(self, attr, None)
+
     def _shutdown_workers(self, ms: int = 2500):
         """Stop every worker thread before Qt tears the window down.
 
@@ -1867,8 +1906,9 @@ class MainWindow(QMainWindow):
         Terminating mid-ffmpeg is not clean, but the alternative here is not a
         clean shutdown -- it is a crash.
         """
-        for name in self._WORKER_ATTRS:
-            t = getattr(self, name, None)
+        workers = [getattr(self, n, None) for n in self._WORKER_ATTRS]
+        workers += list(getattr(self, "_retired", []))
+        for t in workers:
             if not isinstance(t, QThread) or not t.isRunning():
                 continue
             for stopper in ("abort", "stop"):
@@ -2058,6 +2098,7 @@ class MainWindow(QMainWindow):
             E_pa=self.spin_E.value() * 1000.0,          # kPa in the UI, Pa in the model
             thickness_mm=self.spin_t.value(),
             beam_width_mm=self.spin_bw.value(),
+            slot_width_mm=self.spin_slot.value(),
             L_mm=self.spin_Lleg2leg.value(),
             l_mm=self.spin_arm.value(),
             leg_long_mm=self.spin_leg_long.value(),
@@ -2249,7 +2290,13 @@ class MainWindow(QMainWindow):
         return np.array(self._pose_to_preview(self.manual_pose), np.float32)
 
     def _on_region(self, st: dict):
-        """Report what the selected stretch measured."""
+        """Report what the selected stretch measured.
+
+        Only when it actually changed. The panel re-measures on every redraw --
+        a theme switch, a resize, a zoom -- and each one logged the identical
+        four lines, so a session's log was mostly the same selection repeated a
+        dozen times with the real events buried between them.
+        """
         if not st:
             return
         if st.get("note"):
@@ -2272,7 +2319,10 @@ class MainWindow(QMainWindow):
             if np.isfinite(r) and r > 2.0:
                 bits.append(f"          path is {r:.1f}x the net rate — the centroid "
                             f"is wandering more than the robot is traveling")
-        self._log("\n".join(bits))
+        text = "\n".join(bits)
+        if text != getattr(self, "_last_region_log", None):
+            self._last_region_log = text
+            self._log(text)
 
     def _on_run_frame(self, index: int, img):
         """Show the frame the analysis is on, with its outline drawn."""
@@ -2304,6 +2354,7 @@ class MainWindow(QMainWindow):
         self.view.set_pose(None, editable=False)
         self._debounce.stop()
         self.btn_play.setText("❚❚")
+        self._retire("_player")
         self._player = PlaybackWorker(
             self.reader, self.model, self.background, self._seg_cfg(),
             self.slider.value(), self.chk_mask.isChecked(),
@@ -2352,6 +2403,7 @@ class MainWindow(QMainWindow):
         self._stop_play()
         self.btn_automatch.setEnabled(False)
         self.btn_automatch.setText("Matching…")
+        self._retire("_matcher")
         self._matcher = MatchWorker(self.dxf, self.reader, self._seg_cfg(),
                                     self._fit_cfg(), self.chk_gpu.isChecked())
         self._matcher.note.connect(self._log)
@@ -2392,12 +2444,17 @@ class MainWindow(QMainWindow):
             return
         dlg = UpdateDialog(channel, self,
                            on_channel_change=self._set_update_channel)
-        dlg.relaunchRequested.connect(self._relaunch)
         if quiet:
             # Launched by the "check at launch" preference: look first, and only
             # interrupt if there is actually something to install.
             dlg.check()
         dlg.exec()
+        # Read back rather than listened for. A signal emitted from a dialog
+        # that is in the middle of closing has to survive too much to be
+        # trusted with the one step the update depends on, and the symptom when
+        # it did not survive was total silence.
+        if getattr(dlg, "installed_version", ""):
+            self._relaunch()
 
     def _current_time(self) -> float:
         info = self.info
@@ -2429,13 +2486,36 @@ class MainWindow(QMainWindow):
 
     # ---- region of interest ----------------------------------------------
 
+    def _active_roi(self):
+        """The region the analysis should actually use, or None.
+
+        The checkbox governs *use*, not merely drawing. It used to control only
+        whether the region could be edited, so unticking it left the region
+        silently applied to every run -- the one state where the control said
+        one thing and the program did another. The drawn shape is kept while it
+        is off, so unticking is a way to compare with and without rather than a
+        way to throw away a careful placement.
+        """
+        if not getattr(self, "chk_roi", None) or not self.chk_roi.isChecked():
+            return None
+        return list(self.roi) if self.roi else None
+
     def _on_roi_toggle(self, *_):
         on = self.chk_roi.isChecked()
-        self.view.set_roi(self.roi, edit=on)
-        if on:
+        # Hidden entirely when off, rather than shown-but-frozen. A region that
+        # still dimmed the frame while doing nothing was most of why "off" did
+        # not look like off.
+        self.view.set_roi(self.roi if on else None, edit=on)
+        if on and not self.roi:
             self._log("drag on the video to draw the region to track inside; "
                       "then drag its edges to resize, or the grip above it to rotate.")
+        if self.reader is not None:
+            # Whether the region applies changes what the color model should be
+            # estimated from, exactly as moving it does.
+            self._reload_needed()
         self._sync_roi_label()
+        self._touch()
+        self._on_param()
 
     def _on_roi_drawn(self, roi):
         was = list(self.roi) if self.roi else None
@@ -2466,11 +2546,18 @@ class MainWindow(QMainWindow):
         self._render_preview()
 
     def _sync_roi_label(self):
+        on = bool(getattr(self, "chk_roi", None) and self.chk_roi.isChecked())
         if not self.roi:
             self.lbl_roi.setText(
-                "Whole frame. Draw a region when something outside the dish is "
+                "Whole frame. Use a region when something outside the dish is "
                 "brighter or more saturated than the robot — the color model is "
                 "estimated inside the region, not just clipped to it.")
+            return
+        if not on:
+            x, y, w, h = self.roi[:4]
+            self.lbl_roi.setText(
+                f"Whole frame. A {w} × {h} px region is saved but not in use — "
+                "tick the box above to apply it again.")
             return
         x, y, w, h = self.roi[:4]
         ang = float(self.roi[4]) if len(self.roi) > 4 else 0.0
@@ -2482,6 +2569,33 @@ class MainWindow(QMainWindow):
             f"Tracking inside {w} × {h} px at ({x}, {y}){turned}{frac}. "
             "Drag an edge or corner to resize, the round grip to rotate "
             "(hold Shift for 15° steps), or inside it to move.")
+
+    # ---- what belongs to the clip, and what belongs to the experiment ------
+
+    def _forget_clip_state(self):
+        """Drop everything that describes the previous *clip*.
+
+        Thresholds, the drawing, the force model and the output folder describe
+        the experiment and carry over. The fit, the hand placement, the plots
+        and the region describe one recording: a region is a box in that
+        recording's own pixels, and carrying it to the next clip masks a
+        different scene -- silently, because a plausible region produces a
+        plausible-looking mask somewhere else entirely.
+        """
+        self._last_fit_pose = None
+        self.manual_pose = None
+        self._result = None
+        self.btn_export_sel.setEnabled(False)
+        if hasattr(self, "chk_manual"):
+            self.chk_manual.setChecked(False)
+        if self.roi:
+            self._log("region cleared — it was drawn on the previous clip")
+        self.roi = None
+        if hasattr(self, "chk_roi"):
+            self.chk_roi.setChecked(False)
+        self.view.set_roi(None, edit=False)
+        self._sync_roi_label()
+        self.plots.reset()
 
     # ---- appearance ------------------------------------------------------
 
@@ -2619,9 +2733,48 @@ class MainWindow(QMainWindow):
         self._log(f"update channel: {U.describe_channel(channel)}")
 
     def _relaunch(self):
-        self._persist()
+        """Start the updated copy, and only leave once it has proved it started."""
         try:
-            U.relaunch()
+            self._relaunch_inner()
+        except Exception:
+            # Nothing in here may fail silently. An exception raised inside a
+            # Qt slot is printed to a stderr that a windowed build does not
+            # have, which is indistinguishable from the restart simply not
+            # happening -- and that is exactly what this whole area kept
+            # looking like.
+            tb = traceback.format_exc()
+            self._log(tb.strip().splitlines()[-1])
+            self._offer_restart()
+            QMessageBox.warning(
+                self, "Restart to finish",
+                f"The update is installed and will be used next time you open "
+                f"{APP_NAME}.\n\nSomething went wrong while restarting:\n\n{tb}")
+
+    def _relaunch_inner(self):
+        """Start the updated copy, and only leave once it has proved it started.
+
+        The previous versions of this launched a child and quit on the strength
+        of ``Popen`` having returned. The updater's own state file showed what
+        that was worth: patch after patch applied correctly with
+        ``{"attempts": 0}`` beside it -- meaning no new process ever ran this
+        package's startup code -- while the program reported success and carried
+        on as the old version.
+
+        So the child now has to announce itself. It bumps the pending marker at
+        the very top of its own launch, and this waits for that before closing
+        anything. If it never arrives the working copy stays on screen with a
+        standing instruction, which is a far better failure than a self-restart
+        that quietly did not happen -- or, worse, one that closed the only
+        window and put nothing back.
+        """
+        self._persist()
+        pending = U.read_marker()
+        version = pending[0] if pending else ""
+        # Logged before the attempt, not after: if the restart takes the window
+        # with it, this is the line that survives.
+        self._log("restart: " + U.launch_diagnostics())
+        try:
+            proc = U.relaunch()
         except Exception as exc:
             # The update is on disk and will be used at the next launch. Say
             # that first: the previous wording led with the failure, and the
@@ -2634,7 +2787,57 @@ class MainWindow(QMainWindow):
                 f"{exc}\n\nClose the window and open it again.")
             self._log("update installed; restart could not be started "
                       "automatically — close and reopen to use it")
+            self._offer_restart()
             return
+        how = "via the shell" if proc is None else f"as pid {proc.pid}"
+        self._log(f"started the updated copy {how}; waiting for it to report in")
+        self._await_relaunch(proc, version, tries=80)
+
+    def _await_relaunch(self, proc, version: str, tries: int):
+        """Poll for the child's own startup, then hand over to it."""
+        if version and U.child_started(version):
+            self._log("the updated copy is running — closing this one")
+            self._closing = True
+            self._shutdown_workers()
+            QApplication.instance().closeAllWindows()
+            QApplication.instance().quit()
+            # Backstop. quit() only unwinds the loop it is called from, and a
+            # stray modal loop would leave this process alive beside the copy
+            # that just replaced it -- two windows, one of them stale.
+            QTimer.singleShot(2500, lambda: os._exit(0))
+            return
+        dead = proc is not None and proc.poll() not in (None, 0)
+        if tries > 0 and not dead:
+            # A breadcrumb every five seconds, so a slow start and a dead one
+            # look different in the log.
+            if tries % 20 == 0:
+                self._log(f"  still waiting for the updated copy "
+                          f"({(80 - tries) // 4} s)")
+            QTimer.singleShot(250, lambda: self._await_relaunch(proc, version, tries - 1))
+            return
+        why = (f"it exited with code {proc.returncode}" if dead
+               else "it did not finish starting within 20 seconds")
+        self._log(f"the updated copy did not start ({why}) — this window is "
+                  f"still the old version; close and reopen to use the update")
+        self._offer_restart()
+        QMessageBox.information(
+            self, "Restart to finish",
+            f"The update is installed and will be used the next time you open "
+            f"{APP_NAME}.\n\nA new copy was started but {why}, so this window "
+            f"has been left open rather than closing it and leaving you with "
+            f"nothing.\n\nClose it and open it again when you are ready.")
+
+    def _offer_restart(self):
+        """Leave a standing, unmissable instruction in the header.
+
+        A dialog can be dismissed without being read, and this one carries the
+        only thing the user still has to do.
+        """
+        self.btn_update.setText(" Restart to finish")
+        self.btn_update.setToolTip(
+            "The update is installed. Close and reopen the program to use it.")
+        self._start_update_pulse()
+        return
         # Close the windows before quitting. quit() alone leaves any nested
         # modal loop running, and the process then stays up beside the fresh
         # copy it just started.
@@ -2671,6 +2874,10 @@ class MainWindow(QMainWindow):
             self, "Choose video", start,
             "Video (*.mov *.MOV *.mp4 *.MP4 *.m4v *.avi *.mkv);;All files (*)")
         if f:
+            # The same rule Next video already applied to the hand placement:
+            # both belong to the clip being left behind.
+            if f != (self.video or ""):
+                self._forget_clip_state()
             self.video = f
             self.state["last_video_dir"] = str(Path(f).parent)
             self.lbl_video.setText(Path(f).name)
@@ -2789,6 +2996,7 @@ class MainWindow(QMainWindow):
         self.view.set_frame(None, (0, 0))
         self.view.set_pose(None, editable=False)
         self.view.setText("building background model…")
+        self._retire("_loader")
         self._loader = LoadWorker(self.video, self._scale(), self._seg_cfg(),
                                   self.chk_gpu.isChecked())
         self._loader.note.connect(self._log)
@@ -2878,6 +3086,7 @@ class MainWindow(QMainWindow):
             # it must not warm-start from whatever frame was shown last.
             self._fitter.prev = None
 
+        self._retire("_preview")
         self._preview = PreviewWorker(
             self.reader, self.background, self._seg_cfg(), fit_cfg,
             self.template, t, self.chk_gpu.isChecked(),
@@ -3004,9 +3213,10 @@ class MainWindow(QMainWindow):
             # region is deliberately dropped here rather than silently baked in,
             # because the tracker recovers rotation itself and a pre-rotated
             # reference would double-count it.
-            appearance=((self._current_time(), tuple(self.roi[:4]),
+            appearance=((self._current_time(), tuple(self._active_roi()[:4]),
                          self._last_pose_obj())
-                        if (self.chk_appearance.isChecked() and self.roi) else None),
+                        if (self.chk_appearance.isChecked() and self._active_roi())
+                        else None),
             known_width_mm=(self.spin_width.value() or None),
             # Roughly six updates a second at 36 fps: enough to watch tracking
             # hold, cheap enough not to slow the run.
@@ -3061,11 +3271,22 @@ class MainWindow(QMainWindow):
                 self.bar.setVisible(False)
                 return
         self.view.set_pose(None, editable=False)
+        # Force needs a *calibration*, not just a method: it is computed from
+        # length in millimetres, and with no ruler there are no millimetres.
+        # Claiming a force panel here and then losing the column at the end made
+        # the panel appear during the run and vanish the moment it finished,
+        # which reads as the plot breaking rather than as a missing input.
+        can_calibrate = bool(self._true_width_mm() or self.spin_ppm.value())
+        will_have_force = can_calibrate and (
+            self.force_method() == "beam"
+            or (self.force_method() == "lut" and self.lut is not None))
+        if self.force_method() != "none" and not can_calibrate:
+            self._log("no force this run: it needs a calibration, and neither a "
+                      "drawing, a true width nor a px/mm figure is set")
         self.plots.start_live(um_per_px=self._um_per_px(),
-                              has_force=(self.force_method() == "beam"
-                                         or (self.force_method() == "lut"
-                                             and self.lut is not None)),
+                              has_force=will_have_force,
                               width_mm=self._true_width_mm())
+        self._retire("_runner")
         self._runner = RunWorker(cfg)
         self._runner.progress.connect(self._on_progress)
         self._runner.row.connect(self.plots.add_row)

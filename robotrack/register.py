@@ -494,6 +494,14 @@ class ShapeFitter:
         # whatever device is in use. Without the split, a slow run says only
         # that fitting is slow, and the two have completely different fixes.
         self.timings = {"fields": 0.0, "solve": 0.0}
+        # How often the fitted length ends a frame sitting on its upper bound.
+        # The ceiling exists to stop an outline latching onto a tether, but if
+        # it is set too low it silently clips the relaxed end of every cycle --
+        # and since force is computed from (rest - length), clipping the rest
+        # shortens every deflection and under-reports force by the same
+        # proportion. Counted so that can be said out loud instead of inferred.
+        self.n_frames_fitted = 0
+        self.n_at_length_cap = 0
         if self.seed_pose is not None:
             # Anchor the scale limits to the hand-placed size. Deriving them from
             # the first automatic seed instead would bound the search around
@@ -839,6 +847,9 @@ class ShapeFitter:
         # how trackers get permanently lost after a single hard frame.
         self.prev = pose.as_array() if conf >= cfg.recovery_conf else None
         self._note_scales(pose.sx, pose.sy, conf)
+        self.n_frames_fitted += 1
+        if self._len_ref is not None and pose.sy >= sy_hi - 1e-6:
+            self.n_at_length_cap += 1
         return pose
 
     def feature_outline(self, pose: Pose) -> np.ndarray | None:

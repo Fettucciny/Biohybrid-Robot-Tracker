@@ -352,6 +352,31 @@ HELP: dict[str, dict] = {
         ],
     },
 
+    "beam_slot": {
+        "title": "Beam slot width",
+        "short": "A channel running along the beam, removed before I is taken.",
+        "what": "Leave it at 0 for a solid rectangular beam. Set it when the beam "
+                "has a slot or channel through it, and the second moment becomes "
+                "t³(w − slot)/12 rather than t³w/12.\n\n"
+                "This exists so a design like\n"
+                "    I = 1/12·t³·5.06 − 1/12·t³·0.9625\n"
+                "can be entered as it was designed — a 5.06 mm beam with a "
+                "0.9625 mm channel — instead of collapsing to a single 4.0975 mm "
+                "'width' that matches no dimension on the drawing. Both numbers "
+                "then survive into run_info.json, which is what makes the force "
+                "reproducible: a force means nothing without the section it came "
+                "from.",
+        "range": "0 – 100 mm (0 = solid)",
+        "default": "0 mm",
+        "guidance": [
+            "Force is directly proportional to (w − slot), so this scales the "
+            "result as strongly as the width itself does.",
+            "It must be smaller than the beam width; the model floors the "
+            "effective width just above zero rather than returning a negative "
+            "stiffness.",
+        ],
+    },
+
     # ------------------------------------------------------------- analysis
     "smoothing": {
         "title": "Smoothing window",
