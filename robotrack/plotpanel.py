@@ -403,14 +403,23 @@ class PlotPanel(QWidget):
         it confidently showed micrometres and 855 mm/min for a robot that walks
         micrometres a second. Numbers that look real and are three hundred times
         out are worse than no numbers.
+
+        It takes the width from the *first usable frame*, which is the rule the
+        pipeline uses for the real calibration. Taking a running median here
+        instead would make the live axes creep as the clip played and then jump
+        when the finished result replaced them -- a scale visibly disagreeing
+        with itself, for no gain, since the number it was converging on is not
+        the one the run reports.
         """
         if self._final or not self.width_mm or not self._rows:
             return None
         w = np.array([r.get("width_px", np.nan) for r in self._rows], float)
-        w = w[np.isfinite(w) & (w > 0)]
-        if w.size < 3:
+        good = np.flatnonzero(np.isfinite(w) & (w > 0))
+        # Three rows before committing: enough that a single junk opening frame
+        # is visible as such rather than silently setting the axis scale.
+        if good.size == 0 or len(self._rows) < 3:
             return None
-        return 1000.0 * self.width_mm / float(np.median(w))
+        return 1000.0 * self.width_mm / float(w[good[0]])
 
     def add_row(self, rec: dict):
         self._rows.append(rec)

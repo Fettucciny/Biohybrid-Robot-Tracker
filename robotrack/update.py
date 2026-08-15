@@ -375,7 +375,7 @@ def fetch_releases(spec: str) -> list[Release]:
     except FileNotFoundError:
         raise UpdateError(
             f"No update manifest found.\n\nLooked for:\n  {_manifest_location(spec)}\n\n"
-            "Publish one with tools/publish_update.py, or check the channel path.")
+            "Publish one with the publish_update tool, or check the channel path.")
     except (OSError, ValueError) as exc:
         raise UpdateError(f"Could not read the update channel:\n\n{exc}") from exc
     rels.sort(key=lambda r: parse_version(r.version), reverse=True)

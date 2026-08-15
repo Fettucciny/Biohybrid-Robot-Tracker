@@ -136,6 +136,10 @@ class Result:
     fps_processed: float
     width_cv: float = float("nan")      # how constant the ruler actually was
     width_median_px: float = float("nan")
+    # The single frame the scale was taken on, and its raw width. This is the
+    # calibration; width_median_px is only the check on it.
+    width_ref_px: float = float("nan")
+    width_ref_frame: int = -1
     lut: object = None
     lut_clamped: int = 0
     beam: object = None
@@ -203,12 +207,23 @@ class Result:
         if "feature_fit" in t and np.isfinite(_nanmedian(t.feature_fit)):
             lines.append(f"  interior features: {100 * _nanmedian(t.feature_fit):.0f}% "
                          f"of interior points on an observed edge")
+        if np.isfinite(self.width_ref_px):
+            lines.append(f"  width (ruler)    : {self.width_ref_px:.1f} px on frame "
+                         f"{self.width_ref_frame} — this frame sets the scale")
         if np.isfinite(self.width_cv):
             verdict = ("consistent with a rigid width"
                        if self.width_cv < 0.03 else
                        "the width is NOT constant — treat the scale as approximate")
-            lines.append(f"  width (ruler)    : {self.width_median_px:.1f} px median, "
-                         f"CV {100 * self.width_cv:.1f}% — {verdict}")
+            lines.append(f"  width (check)    : {self.width_median_px:.1f} px median "
+                         f"over the clip, CV {100 * self.width_cv:.1f}% — {verdict}")
+            if np.isfinite(self.width_ref_px) and self.width_median_px > 0:
+                off = self.width_ref_px / self.width_median_px - 1.0
+                if abs(off) > 0.03:
+                    lines.append(
+                        f"  WARNING          : the calibration frame is "
+                        f"{100 * off:+.1f}% off the clip's median width, so every "
+                        f"absolute length and force is scaled by that much. Check "
+                        f"the outline on frame {self.width_ref_frame}.")
         if len(t):
             unit_um = self.calibration_px_per_mm is not None
             lines += [
@@ -515,7 +530,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         if col == "cx":
             t["occluded"] = bad
 
-    # --- calibration: the robot's own width is the ruler ----------------------
+    # --- calibration: the robot's own width, on the reference frame -----------
     #
     # The frame is rigid across its short axis while the long axis is what
     # contracts, so the width is a constant of known length carried in every
@@ -523,9 +538,24 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     # and cannot be forgotten at capture time. Combined with the width from the
     # drawing it gives px/mm directly, per clip.
     #
-    # The assumption is checkable, so it is checked: the width's coefficient of
-    # variation is computed and reported. If the width is in fact moving, that
-    # number says so instead of quietly biasing every micrometer in the output.
+    # The scale is taken from **one frame**: the first usable one, which is the
+    # frame the run starts on. Earlier builds used the median width over every
+    # confident frame, which is the lower-variance estimator and is nonetheless
+    # the wrong one here. A median is a property of the whole clip, so the same
+    # video analysed over a different frame range, or with the confidence floor
+    # nudged, produces a different micrometre-per-pixel and therefore different
+    # absolute lengths and forces -- the calibration moved because the *analysis*
+    # moved, which is not something a ruler is allowed to do. Anchoring it to the
+    # opening frame makes the scale a property of the recording: fixed the moment
+    # Run is pressed, reproducible, and independent of anything measured later.
+    #
+    # The assumption is still checkable, so it is still checked: the width's
+    # coefficient of variation over all confident frames is computed and
+    # reported. It no longer feeds the scale, but if the width is in fact moving,
+    # that number says so instead of quietly biasing every micrometer in the
+    # output -- and it now also says how far the rest of the clip drifted from
+    # the one frame the scale was taken on.
+    #
     # An appearance lock with no reference pose reports *ratios*, not pixels --
     # it knows how much the robot changed, not how big it is. Calibrating a
     # width ruler off a ratio produces a scale that looks plausible and is
@@ -539,6 +569,8 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     px_per_mm, src = cfg.px_per_mm, "user-supplied"
     width_cv = float("nan")
     width_med_px = float("nan")
+    width_ref_px = float("nan")
+    width_ref_frame = -1
     ok = t.confidence >= cfg.analysis.min_confidence
     true_width_mm = cfg.known_width_mm if cfg.known_width_mm else (
         tpl.width_mm if tpl is not None else None)
@@ -551,16 +583,42 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
             "For absolute sizes, load a drawing or place the outline by hand on "
             "the reference frame before running.")
     if true_width_mm and ok.any():
+        # Diagnostic only, over the whole clip.
         w = t.loc[ok, "width_px"].to_numpy()
         width_med_px = float(np.nanmedian(w))
         if np.isfinite(width_med_px) and width_med_px > 0:
             width_cv = float(np.nanstd(w) / width_med_px)
-            if px_per_mm is None:
-                px_per_mm = width_med_px / max(true_width_mm, 1e-9)
-                whence = ("entered directly" if cfg.known_width_mm
-                          else "from the drawing")
-                src = (f"robot width — {width_med_px:.1f} px = "
-                       f"{true_width_mm:.3f} mm {whence}")
+
+        # The scale itself. Raw rather than smoothed: the filter's window is
+        # one-sided at frame zero and fills it by extrapolating from frames the
+        # ruler has no business depending on. Frame zero is used when it is
+        # usable; if it is not -- an occlusion, a fit that has not settled -- the
+        # search walks forward to the first frame that is, rather than throwing
+        # away the calibration over one bad opening frame. Which frame it landed
+        # on is named in the log and in run_info.json, because a single-frame
+        # calibration that does not say which frame is not reproducible.
+        col = "width_px_raw" if "width_px_raw" in t else "width_px"
+        wr = t[col].to_numpy()
+        okv = ok.to_numpy()
+        for i in range(len(wr)):
+            if okv[i] and np.isfinite(wr[i]) and wr[i] > 0:
+                width_ref_px, width_ref_frame = float(wr[i]), i
+                break
+
+        if np.isfinite(width_ref_px) and px_per_mm is None:
+            px_per_mm = width_ref_px / max(true_width_mm, 1e-9)
+            whence = ("entered directly" if cfg.known_width_mm
+                      else "from the drawing")
+            where = ("first frame" if width_ref_frame == 0
+                     else f"frame {width_ref_frame}, the first usable one")
+            src = (f"robot width on the {where} — {width_ref_px:.1f} px = "
+                   f"{true_width_mm:.3f} mm {whence}")
+            if width_ref_frame > 0:
+                notes.append(
+                    f"the scale was taken on frame {width_ref_frame} rather than "
+                    f"frame 0: the opening frame{'s' if width_ref_frame > 1 else ''} "
+                    f"had no usable width. Every absolute length and force in this "
+                    f"run rests on that one frame, so check the outline there.")
     if px_per_mm is None:
         src = "none"
 
@@ -641,6 +699,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     res = Result(info, dev, t, tpl, px_per_mm, src, per, elapsed,
                  len(t) / elapsed if elapsed else 0.0,
                  width_cv=width_cv, width_median_px=width_med_px,
+                 width_ref_px=width_ref_px, width_ref_frame=width_ref_frame,
                  lut=lut, lut_clamped=n_clamped, beam=beam,
                  force_method=method, resting_length_mm=rest_mm,
                  aspect_measured=aspect_ratio, aspect_drawn=aspect_drawn,
@@ -662,6 +721,8 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
             "calibration_px_per_mm": px_per_mm, "calibration_source": src,
             "calibration_um_per_px": um_per_px,
             "width_median_px": width_med_px, "width_cv": width_cv,
+            "calibration_width_px": width_ref_px,
+            "calibration_frame": width_ref_frame,
             "dxf_scale": cfg.dxf_scale,
             "interior_features": (tpl.n_features if tpl else 0),
             "aspect_measured": aspect_ratio, "aspect_drawn": aspect_drawn,

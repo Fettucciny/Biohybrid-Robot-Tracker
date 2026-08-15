@@ -75,29 +75,21 @@ class BeamForceModel:
     to a robot design rather than to the method, and two scripts describing the
     same robot have already disagreed about it more than once.
 
-    The section is the part worth stating plainly. It is **not** a solid
-    rectangle: the beam is 5.06 mm wide with a 0.9625 mm channel through it, so
+    The section is a solid rectangle, 1.1 mm thick and 5.06 mm wide:
 
-        I = t³(5.06 − 0.9625)/12 = 0.45448 mm⁴
+        I = t³ · 5.06 / 12 = 0.56124 mm⁴
 
-    which is what the lab's own force script computes. An earlier default here
-    treated it as a solid 3.025 mm beam, giving 0.33552 mm⁴ and reporting force
-    26% low -- a run that read 4.0 mN reads 5.4 mN with the real section.
+    Two earlier answers here were wrong, and both are worth recording because
+    both produced entirely plausible forces. Treating the beam as a solid
+    3.025 mm section gave 0.33552 mm⁴ and read 40% low. Subtracting a 0.9625 mm
+    channel -- copied from a script that models the beam as slotted -- gave
+    0.45448 mm⁴ and read 19% low. The width is the drawn 5.06 mm with nothing
+    taken out of it.
     """
 
     E_pa: float = 293e3            # Young's modulus of the beam material
     thickness_mm: float = 1.1      # beam thickness, in the bending direction
     beam_width_mm: float = 5.06    # beam width, as drawn
-    # Width of a slot running along the beam, subtracted from the width before
-    # the second moment is taken. Some designs are not solid rectangles: a
-    # colleague's script computes I as
-    #     1/12*t^3*5.06 - 1/12*t^3*0.9625
-    # which is a 5.06 mm beam with a 0.9625 mm channel through it. There was no
-    # way to say that here, so matching such a script meant entering the
-    # difference by hand as the width and leaving the drawing's real dimension
-    # unrecorded. Both numbers now survive into run_info.json, which is the
-    # point -- a force is only reproducible if the section it came from is.
-    slot_width_mm: float = 0.9625
     L_mm: float = 8.03             # leg center to leg center
     l_mm: float = 1.238            # beam neutral axis to muscle line of action
     leg_long_mm: float = 4.125     # legs are tapered; both ends are averaged
@@ -105,12 +97,8 @@ class BeamForceModel:
     resting: str = "max"           # "max" (as in the .m file) or "median"
 
     @property
-    def effective_width_mm(self) -> float:
-        return max(self.beam_width_mm - self.slot_width_mm, 1e-9)
-
-    @property
     def I_mm4(self) -> float:
-        return self.thickness_mm ** 3 * self.effective_width_mm / 12.0
+        return self.thickness_mm ** 3 * self.beam_width_mm / 12.0
 
     @property
     def L_leg_mm(self) -> float:
@@ -123,16 +111,13 @@ class BeamForceModel:
 
     def summary(self) -> str:
         return (f"beam model: E {self.E_pa / 1e3:.0f} kPa, "
-                f"I {self.I_mm4:.5f} mm⁴ ({self.thickness_mm}×{self.beam_width_mm}"
-                + (f"−{self.slot_width_mm} slot" if self.slot_width_mm else "")
-                + " mm), "
+                f"I {self.I_mm4:.5f} mm⁴ ({self.thickness_mm}×{self.beam_width_mm} mm), "
                 f"L {self.L_mm} mm, l {self.l_mm} mm, leg {self.L_leg_mm:.3f} mm "
                 f"→ {self.stiffness:.0f} µN/rad, rest = {self.resting}")
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d.update(I_mm4=self.I_mm4, L_leg_mm=self.L_leg_mm,
-                 effective_width_mm=self.effective_width_mm,
                  stiffness_un_per_rad=self.stiffness)
         return d
 

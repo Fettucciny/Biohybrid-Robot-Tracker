@@ -31,6 +31,30 @@ TestRun/
 results/
 out*/
 
+# ---------------------------------------------------------------------------
+# Kept on disk, out of the public repository.
+#
+# Neither is dead code and neither should be deleted locally:
+#
+#   tools/publish_update.py    builds every update payload and manifest, and is
+#                              how patches reach an offline rig or a shared
+#                              folder without a GitHub release.
+#   tools/release-workflow.yml the source of .github/workflows/release-workflow.yml.
+#                              That path is awkward to write to from tooling, so
+#                              this copy is how workflow changes get delivered.
+#   tests/                     the synthetic ground-truth harness. It generates a
+#                              clip with prescribed length, frequency and
+#                              occlusion, and scores the recovery against it --
+#                              which is what every numerical change in this
+#                              program has been checked with.
+#
+# They are excluded because the repository is the *application*, and someone
+# cloning it to install the program has no use for either. Delete these two
+# lines to publish them again.
+# ---------------------------------------------------------------------------
+/tests/
+/tools/
+
 # Local machine state
 *.rtcfg
 robotrack-selftest.log

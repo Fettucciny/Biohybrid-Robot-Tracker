@@ -47,7 +47,6 @@ DEFAULTS: dict[str, Any] = {
     "beam_E_kpa": 293.0,
     "beam_thickness_mm": 1.100,
     "beam_width_mm": 5.06,
-    "beam_slot_mm": 0.9625,         # channel through the beam, subtracted from w
     "beam_leg_to_leg_mm": 8.030,
     "beam_muscle_offset_mm": 1.238,
     "beam_leg_long_mm": 4.125,
@@ -179,17 +178,12 @@ CORRECTED: dict[str, tuple[float, float, str]] = {
         1.642, 1.238,
         "SampleForce.m was corrected; the moment arm scales force by 1/l, so "
         "the old value read about 32% low"),
-    # The beam is not solid. It is 5.06 mm wide with a 0.9625 mm channel through
-    # it, which is how the lab's force script has always computed the section;
-    # treating it as a solid 3.025 mm beam understated I by 26% and every force
-    # with it. Corrected together, since either alone is a different beam again.
+    # The section is the drawn 5.06 mm width, solid. An earlier build used
+    # 3.025 mm, which understated I -- and every force with it -- by 40%.
     "beam_width_mm": (
         3.025, 5.06,
-        "the beam is 5.06 mm wide with a 0.9625 mm channel, not a solid "
-        "3.025 mm section; force scales with I, so the old value read 26% low"),
-    "beam_slot_mm": (
-        0.0, 0.9625,
-        "the channel through the beam was previously not represented at all"),
+        "the beam is 5.06 mm wide, not 3.025 mm; force scales with I, so the "
+        "old value read 40% low"),
 }
 
 

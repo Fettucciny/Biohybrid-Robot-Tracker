@@ -352,31 +352,6 @@ HELP: dict[str, dict] = {
         ],
     },
 
-    "beam_slot": {
-        "title": "Beam slot width",
-        "short": "A channel running along the beam, removed before I is taken.",
-        "what": "Leave it at 0 for a solid rectangular beam. Set it when the beam "
-                "has a slot or channel through it, and the second moment becomes "
-                "t³(w − slot)/12 rather than t³w/12.\n\n"
-                "This exists so a design like\n"
-                "    I = 1/12·t³·5.06 − 1/12·t³·0.9625\n"
-                "can be entered as it was designed — a 5.06 mm beam with a "
-                "0.9625 mm channel — instead of collapsing to a single 4.0975 mm "
-                "'width' that matches no dimension on the drawing. Both numbers "
-                "then survive into run_info.json, which is what makes the force "
-                "reproducible: a force means nothing without the section it came "
-                "from.",
-        "range": "0 – 100 mm (0 = solid)",
-        "default": "0 mm",
-        "guidance": [
-            "Force is directly proportional to (w − slot), so this scales the "
-            "result as strongly as the width itself does.",
-            "It must be smaller than the beam width; the model floors the "
-            "effective width just above zero rather than returning a negative "
-            "stiffness.",
-        ],
-    },
-
     # ------------------------------------------------------------- analysis
     "smoothing": {
         "title": "Smoothing window",
@@ -455,8 +430,10 @@ HELP: dict[str, dict] = {
         "title": "Pixels per millimeter",
         "short": "Spatial calibration. Leave at 0 to self-calibrate from the DXF.",
         "what": "Converts pixel measurements to millimeters. Measure it from a ruler "
-                "placed in the plane of motion. At 0, and with a DXF loaded, it is "
-                "inferred from the drawing's known dimensions.",
+                "placed in the plane of motion. A value typed here wins over "
+                "everything else. At 0, the scale is derived from True width (or the "
+                "drawing's width) divided into the robot's pixel width on the first "
+                "frame of the run.",
         "range": "0 (auto) or 0.1 – 10000 px/mm",
         "default": "0 (auto)",
         "guidance": [
@@ -575,7 +552,13 @@ HELP: dict[str, dict] = {
         "what": "Scale comes from the robot's own width: it is rigid while the "
                 "length contracts, so it is a known length present in every frame. "
                 "Normally the width is taken from the drawing; type a value here to "
-                "override it, or to get micrometers with no DXF at all.",
+                "override it, or to get micrometers with no DXF at all.\n\n"
+                "The pixel side of that ratio is read off the <b>first frame of the "
+                "run</b> — one frame, fixed the moment Run is pressed — not averaged "
+                "over the clip. A ruler should not change because you analysed more "
+                "of the video or moved the confidence floor. If the opening frame "
+                "has no usable width the search walks forward to the first that "
+                "does, and the run summary names which frame it landed on.",
         "range": "0 (use the drawing) – 10000 mm",
         "default": "from drawing",
         "guidance": [

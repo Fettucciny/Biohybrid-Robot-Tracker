@@ -993,7 +993,6 @@ class MainWindow(QMainWindow):
         self.spin_E = beam_row("Young's modulus", 0.1, 1e6, 293.0, 2, " kPa", "beam_E")
         self.spin_t = beam_row("Beam thickness", 0.001, 100.0, 1.100, 3, " mm", "beam_geom")
         self.spin_bw = beam_row("Beam width", 0.001, 100.0, 5.060, 3, " mm", "beam_geom")
-        self.spin_slot = beam_row("Beam slot width", 0.0, 100.0, 0.9625, 4, " mm", "beam_slot")
         self.spin_Lleg2leg = beam_row("Leg to leg", 0.001, 1000.0, 8.030, 3, " mm", "beam_geom")
         self.spin_arm = beam_row("Muscle offset", 0.001, 1000.0, 1.238, 3, " mm", "beam_geom")
         self.spin_leg_long = beam_row("Leg length (long)", 0.001, 1000.0, 4.125, 3, " mm", "beam_geom")
@@ -1730,7 +1729,6 @@ class MainWindow(QMainWindow):
             "beam_E_kpa": spin(self.spin_E),
             "beam_thickness_mm": spin(self.spin_t),
             "beam_width_mm": spin(self.spin_bw),
-            "beam_slot_mm": spin(self.spin_slot),
             "beam_leg_to_leg_mm": spin(self.spin_Lleg2leg),
             "beam_muscle_offset_mm": spin(self.spin_arm),
             "beam_leg_long_mm": spin(self.spin_leg_long),
@@ -2098,7 +2096,6 @@ class MainWindow(QMainWindow):
             E_pa=self.spin_E.value() * 1000.0,          # kPa in the UI, Pa in the model
             thickness_mm=self.spin_t.value(),
             beam_width_mm=self.spin_bw.value(),
-            slot_width_mm=self.spin_slot.value(),
             L_mm=self.spin_Lleg2leg.value(),
             l_mm=self.spin_arm.value(),
             leg_long_mm=self.spin_leg_long.value(),

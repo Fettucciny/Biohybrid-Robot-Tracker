@@ -357,7 +357,8 @@ than failing the launch.
 ### Updates
 
 The **Update** button in the header checks a channel and installs what it finds.
-Publish with:
+Publish with `tools/publish_update.py` — not in this repository (see Validation
+above), but present in the working copy:
 
 ```powershell
 python tools/publish_update.py "C:\Users\you\Nextcloud2\robotrack-updates" --notes "..."
@@ -1712,6 +1713,11 @@ against 2.40 drawn; at 0.50 it reads 1.42, and says so.
 ---
 
 ## Validation
+
+> `tests/` and `tools/` are kept out of this repository — they are development
+> machinery, and someone cloning this to install the program has no use for
+> either. The commands below are recorded for anyone working on the code, who
+> will have them in their working copy.
 
 `tests/make_synthetic.py` generates a clip with exactly prescribed ground truth:
 a tapered body contracting at 1.5 Hz (length ±12%, width ∓8%, as an
