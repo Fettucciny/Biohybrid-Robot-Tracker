@@ -611,6 +611,62 @@ HELP: dict[str, dict] = {
         "short": "The dimensions the bending calculation is built from.",
         "what": "These are the fixed terms of the force equation, all measured on the fabricated part rather than taken from the drawing.<br><br>The Cvetkovic model computes force from the robot's own mechanics rather than from a calibration. A muscle ring anchored below the beam contracts and pulls the leg tips together; the legs rotate as rigid links about their bases, that rotation is imposed on the ends of the compliant beam, and the beam's bending stiffness is what resists. Read backwards, the pull-in measured on video gives the force that caused it.<br><br><b>&nbsp;&nbsp;I = t³·w / 12</b><br><b>&nbsp;&nbsp;θ = asin( (δ/2) / L_leg )</b><br><b>&nbsp;&nbsp;M = 2·E·I·θ / L</b><br><b>&nbsp;&nbsp;F = M / l = 2·E·I·θ / (l·L)</b><br><br><b>δ</b> is the shortening from rest — the resting leg separation minus the separation now — and is the only quantity that comes from the video; everything else is fixed geometry or material. <b>L_leg</b> is the average leg length, and dividing the pull-in between the two legs and taking the arcsine converts a horizontal displacement into the angle each leg has swung through. <b>t</b> is the beam thickness in the bending direction and <b>w</b> its width; together they give <b>I</b>, the second moment of area, which is how strongly the cross-section resists bending — note it goes as the <i>cube</i> of thickness. <b>E</b> is Young's modulus of the hydrogel the beam is cast from, the material's intrinsic stiffness. <b>L</b> is the span that bends, measured leg center to leg center, and appears because a longer beam rotates further for the same moment. <b>M</b> is that moment: the beam's elastic reaction to being rotated by θ at both ends. <b>l</b> is the moment arm — the perpendicular distance from the beam's neutral axis down to the muscle's line of action — and converts the moment back into the force <b>F</b> that produced it.<br><br>Cvetkovic et al. (PNAS 2014) write the same physics as P = 8·E·I·δ_max/(l·L²), in terms of the beam's transverse mid-span deflection δ_max rather than the leg rotation. The two are algebraically identical — substituting δ_max = θ·L/4 turns one into the other, verified numerically to 0.00% across pull-ins from 0.05 to 1.5 mm. The rotation form is used here because it takes the quantity a top-down camera can actually measure.<br><br>With E in pascals and every length in millimeters, E·I/(l·L) evaluates to Pa·mm² = 10⁻⁶ N, so <b>force emerges in micronewtons with no conversion factor</b> — the unit this literature reports, against roughly 395 µN of active tension and 534–1147 µN of passive tension in that paper.<br><br>Two sensitivities are worth carrying in mind. Force is <i>directly proportional to E</i>, and a cast hydrogel's modulus varies between batches and drifts in culture, which makes it the least certain quantity in the calculation; because it enters linearly, a force can be rescaled afterwards without re-tracking. And because I depends on t³, a ten percent error in a callipered thickness becomes a thirty-three percent error in force.",
     },
+    "leg_marks": {
+        "title": "Leg points",
+        "short": "Measure the force from how far two marked points close, not "
+                 "from the robot's overall length.",
+        "what": "Click two points on the video — one on each leg — and the "
+                "distance between them is tracked frame by frame and becomes "
+                "the length the force is computed from. Drag either mark to "
+                "adjust it. Untick to go back to measuring the whole body.<br><br>"
+                "<b>Why this exists.</b> The beam model's δ is how much closer "
+                "the two legs are than at rest, and that is not the same as how "
+                "much shorter the robot got. Both of the other measurements — "
+                "the silhouette's long-axis extent, and the fitted CAD outline — "
+                "describe the robot as one shape that translates, rotates and "
+                "scales. A muscle-driven robot does not deform that way: the "
+                "beam does not shorten, the legs pivot inward and the rest of "
+                "the body comes along. A whole-body measurement spreads the leg "
+                "closure over the entire outline and reports a fraction of it.<br><br>"
+                "Against a colleague's frame-by-frame manual tracking of the "
+                "same clip, the silhouette reported <b>0.759 mm of length change "
+                "per 1 mm of real leg closure</b>, with a correlation of 0.993 — "
+                "following the motion perfectly and reporting the wrong "
+                "quantity, which is the failure that does not look like one. "
+                "Two marked points recover a slope of 0.998 and a force within "
+                "1% of the manual result.<br><br>"
+                "Marking the legs in the DXF instead would not work, and it is "
+                "worth knowing why: under a fitted pose, two template-fixed "
+                "points end up a <i>constant multiple</i> of the fitted length "
+                "apart. They carry no information the length column did not "
+                "already have. The marks have to be tracked in the image, "
+                "independently of the body, which is what this does.",
+        "range": "two points on the frame",
+        "default": "off — force from the overall length",
+        "guidance": [
+            "Tick the box, then press 'Mark on video' and click the two points. "
+            "While marking is on, the region and the placed outline stop "
+            "responding to clicks, so nothing competes for them; press 'Done "
+            "marking' to hand the picture back.",
+            "Mark the two ends of the beam, where it meets the legs. That is the "
+            "pair every other term in the model is written for: 'Leg to leg' is "
+            "their span and the leg angle is what carries them together. The run "
+            "checks this for you — at rest the marks should sit 'Leg to leg' "
+            "apart, and the summary says so if they do not.",
+            "Marks further out along the legs swing further for the same "
+            "rotation and read high; marks inboard read low. Neither looks like "
+            "anything but a plausible force, so the resting span is the check "
+            "worth doing.",
+            "Pick features with structure — a pad, a corner, a printed edge. A "
+            "patch of flat tissue has nothing to lock onto and will wander.",
+            "Marks are pixel coordinates in one recording and are cleared when a "
+            "new clip is loaded, exactly like the region.",
+            "Frames where a mark could not be solved hold their last position "
+            "and are counted in the summary. A held frame is a flat spot, so it "
+            "shallows any contraction it lands in.",
+        ],
+    },
+
     "beam_rest": {
         "title": "Resting length",
         "short": "The length that the shortening δ is measured from.",

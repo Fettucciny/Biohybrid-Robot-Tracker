@@ -11,6 +11,7 @@ valid range, clicking opens the full explanation from paramhelp.py.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 
 from PySide6.QtCore import (QEvent, QObject, QSize, Qt, QThread, QTimer,
@@ -40,7 +42,7 @@ from . import update as U
 from . import APP_NAME
 from .cad import Template, load_dxf, read_loops
 from .decode import FrameReader, select_backend
-from .gpu import get_device
+from .gpu import get_device, verify_device
 from .ingest import VideoInfo, probe
 from .kinematics import AnalysisConfig
 from .paramhelp import HELP
@@ -48,11 +50,12 @@ from .pipeline import (RunAborted, RunConfig,
                        output_dir as pipeline_output_dir, run)
 from .forcelut import LUTError, load_lut
 from .forcemodel import BeamForceModel
-from .placement import PreviewView
+from .placement import PreviewView, norm_leg_marks
 from .plotpanel import PlotPanel
 from .register import FitConfig, ShapeFitter
 from .segment import (ColorModel, SegmentConfig, build_background,
-                      choose_color_model, largest_component, segment_color_d,
+                      choose_color_model, color_distance, largest_component,
+                      segment_color_d,
                       segment_frame)
 from .shape import measure_mask
 from .theme import (ACCENT, C, Card, HelpBadge, apply as apply_theme, glyph,
@@ -151,23 +154,51 @@ class LoadWorker(QThread):
         self.video, self.scale, self.seg, self.gpu = video, scale, seg, gpu
 
     def run(self):
+        # Timed per stage. "Opening is slow" is not actionable and the three
+        # stages fail slowly for completely different reasons -- ffprobe waiting
+        # on a cloud-sync placeholder to materialise, a keyframe pass on a long
+        # 4K clip, a median plate over sixty frames. One line at the end says
+        # which, and costs nothing.
         try:
+            t0 = time.time()
             self.note.emit("probing video…")
             info = probe(self.video)
             backend = select_backend(info)
+            t_probe = time.time() - t0
             self.note.emit(f"decoder: {backend.name} — {backend.description}")
             reader = FrameReader(info, backend, scale=self.scale)
 
+            t1 = time.time()
             self.note.emit("measuring color separation…")
             model, _ = choose_color_model(reader, self.seg)
+            t_color = time.time() - t1
             self.note.emit(model.summary())
 
             bg = None
+            t_bg = 0.0
             if model.mode != "color":
                 # Only luma needs the median plate, and it is the expensive part.
+                t2 = time.time()
                 self.note.emit(f"building background plate from "
                                f"{self.seg.n_background_frames} frames…")
                 bg, _ = build_background(reader, self.seg, get_device(self.gpu))
+                t_bg = time.time() - t2
+            route = getattr(reader, "sample_path", "keyframes")
+            self.note.emit(
+                f"opened in {time.time() - t0:.1f} s — probe {t_probe:.1f} s, "
+                f"colour {t_color:.1f} s"
+                + (f", background plate {t_bg:.1f} s" if t_bg else "")
+                + f"  ({info.width}×{info.height}, {info.n_frames} frames, "
+                + f"sampled by {route})")
+            if route != "keyframes":
+                # The fast path failed. Say so: the slow ones are 10x and 100x
+                # the cost and are otherwise invisible.
+                why = getattr(reader, "last_error", "") or ""
+                self.note.emit(
+                    f"WARNING: the keyframe pass produced nothing, so frames were "
+                    f"sampled by {route} instead — this is why opening was slow."
+                    + (f"  ffmpeg said: {why}" if why else
+                       "  Try a different decoder if this repeats."))
             self.done.emit(info, reader, bg, model, None)
         except Exception:
             self.done.emit(None, None, None, None, traceback.format_exc())
@@ -226,7 +257,16 @@ class PreviewWorker(QThread):
                     # medium's color. The threshold is a horizontal cut through
                     # this surface, so a mask that looks wrong is diagnosed here
                     # rather than guessed at from the photograph.
-                    scaled = np.clip(dist / max(self.model.separation, 1e-6) * 255.0,
+                    #
+                    # Recomputed over the whole frame for the *picture* only.
+                    # The segmenter confines its work to the region's bounding
+                    # box and leaves everything outside at zero, which is right
+                    # for the measurement and wrong for the view: it rendered
+                    # the entire frame outside the region as flat black, so
+                    # there was no way to see what the region had excluded or
+                    # whether it was in the right place.
+                    full = color_distance(frame, self.model.bg_ab)
+                    scaled = np.clip(full / max(self.model.separation, 1e-6) * 255.0,
                                      0, 255).astype(np.uint8)
                     img = cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS)
                 else:
@@ -310,11 +350,17 @@ class PlaybackWorker(QThread):
     finished_at = Signal(int)
 
     def __init__(self, reader, model, bg, seg_cfg, start_index, show_mask, gpu, fps,
-                 view="video"):
+                 view="video", leg_marks=None):
         super().__init__()
         self.reader, self.model, self.bg, self.seg_cfg = reader, model, bg, seg_cfg
         self.start_index, self.show_mask, self.gpu = start_index, show_mask, gpu
         self.view = view
+        # Playback is the one place the marks can be watched *before* committing
+        # to a run. It is also the only sequential decode outside a run, which is
+        # what a tracker needs -- scrubbing jumps around and has no previous
+        # position to start from. At 2.5 ms a frame this fits inside the frame
+        # budget with room to spare.
+        self.leg_marks = leg_marks
         self.fps = max(float(fps), 1.0)
         self._stop = False
         self._last = start_index
@@ -329,6 +375,7 @@ class PlaybackWorker(QThread):
             min_area = self.seg_cfg.min_area_frac * self.reader.width * self.reader.height
             period = 1.0 / self.fps
             next_due = time.monotonic()
+            legs = None
             for i, t, frame in self.reader:
                 if self._stop:
                     break
@@ -345,7 +392,10 @@ class PlaybackWorker(QThread):
                     # robot's distance from the medium dips toward the
                     # threshold is visible here and invisible in the video.
                     if self.view == "chroma":
-                        scaled = np.clip(d / max(self.model.separation, 1e-6) * 255.0,
+                        # Whole frame, for the same reason as the preview: the
+                        # region confines the measurement, not the picture.
+                        full = color_distance(frame, self.model.bg_ab)
+                        scaled = np.clip(full / max(self.model.separation, 1e-6) * 255.0,
                                          0, 255).astype(np.uint8)
                         img = cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS)
                     else:
@@ -380,6 +430,26 @@ class PlaybackWorker(QThread):
                         cv2.polylines(img, [c.astype(np.int32) for c in contours],
                                       True, line, 2 if self.view == "chroma" else 1,
                                       cv2.LINE_AA)
+                if self.leg_marks is not None:
+                    sig = d if color else (frame if frame.ndim == 2 else
+                                           cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+                    if legs is None:
+                        try:
+                            from .legpoints import LegTracker
+                            legs = LegTracker(sig, self.leg_marks,
+                                              scale=self.reader.scale)
+                        except (ValueError, Exception):
+                            self.leg_marks = None
+                    if legs is not None:
+                        smp = legs.track(sig)
+                        col = (176, 212, 76) if smp.ok else (60, 190, 250)
+                        a_pt = (int(smp.ax), int(smp.ay))
+                        b_pt = (int(smp.bx), int(smp.by))
+                        cv2.line(img, a_pt, b_pt, col, 1, cv2.LINE_AA)
+                        for pt in (a_pt, b_pt):
+                            cv2.circle(img, pt, 6, col, 2, cv2.LINE_AA)
+                            cv2.circle(img, pt, 1, col, -1, cv2.LINE_AA)
+
                 # Drop frames rather than fall behind: playing at the clip's real
                 # rate matters more than showing every frame.
                 next_due += period
@@ -536,7 +606,20 @@ class MainWindow(QMainWindow):
         # survives a change of decode scale.
         self.manual_pose: list[float] | None = self.state.get("manual_pose")
         self.roi: list | None = self.state.get("roi") or None
+        # Two points on the robot's legs, full-resolution image px, same
+        # convention as the region and the hand placement.
+        self.legs: list | None = norm_leg_marks(self.state.get("leg_marks")) or None
         self._last_fit_pose: list[float] | None = None
+        self._batch: dict | None = None
+        # NOT ``_loaded``. That is the name of the LoadWorker's done handler
+        # three hundred lines below, and assigning an attribute over it here
+        # shadowed the bound method on every instance -- so
+        # ``self._loader.done.connect(self._loaded)`` raised TypeError, .start()
+        # was never reached, and from 0.37.0 no video could be opened at all.
+        # The traceback went to a stderr a windowed build does not have, so the
+        # only symptom was a progress line that never advanced.
+        self._loaded_results: dict | None = None
+        self._results_listing: list | None = None
 
         # Panel state. Read before the sidebar is built, because the sidebar
         # restores from it rather than the other way round.
@@ -561,6 +644,13 @@ class MainWindow(QMainWindow):
         self._persist_timer.setInterval(700)
         self._persist_timer.timeout.connect(self._persist)
 
+        self._install_crash_logging()
+        self._stage_name = ""
+        self._stage_started = 0.0
+        self._stage_timer = QTimer(self)
+        self._stage_timer.setInterval(10_000)
+        self._stage_timer.timeout.connect(self._stage_tick)
+
         root = QWidget()
         root.setObjectName("background")      # kit hook: indigo->teal gradient
         outer = QVBoxLayout(root)
@@ -569,8 +659,10 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_header())
 
         split = self._split = QSplitter(Qt.Horizontal)
-        split.addWidget(self._build_sidebar())
-        split.addWidget(self._build_viewer())
+        self._col_params = self._build_sidebar()
+        self._col_video = self._build_viewer()
+        split.addWidget(self._col_params)
+        split.addWidget(self._col_video)
         split.addWidget(self._build_plots_column())
         split.setStretchFactor(1, 1)
         split.setSizes([400, 700, 380])
@@ -605,6 +697,27 @@ class MainWindow(QMainWindow):
         self.chip_gpu.setText(dev.name if dev.accelerated else "CPU only")
         style_chip(self.chip_gpu, "ok" if dev.accelerated else "warn")
         self._log(f"device: {dev}")
+        # Check the accelerator here, not only inside a run.
+        #
+        # verify_device exists to catch a backend that computes grid_sample
+        # subtly wrong -- it returns numbers, the optimiser converges on them,
+        # and the fit lands confidently on the wrong part of the picture. It was
+        # called from exactly one place, guarding the batch run, while the five
+        # worker paths this window uses built their devices directly. So the
+        # preview and the hand placement -- what you tune against, and what
+        # seeds the run -- were unverified, on the one platform the check was
+        # written for. The result is cached per device kind, so this costs a
+        # millisecond once.
+        try:
+            trusted, why = verify_device(dev)
+            if not trusted:
+                self._log(f"WARNING: {dev.kind} did not pass its correctness "
+                          f"check — {why}")
+                self._log("  fits may land confidently on the wrong part of the "
+                          "frame. Untick 'use GPU' under Output to work on the CPU.")
+                style_chip(self.chip_gpu, "warn")
+        except Exception as e:
+            self._log(f"could not verify the accelerator: {e}")
         for note in getattr(self, "_corrections", []):
             self._log(f"corrected a saved setting — {note}")
             self._log("  re-run any analysis whose force numbers you intend to use.")
@@ -699,6 +812,20 @@ class MainWindow(QMainWindow):
         # as more information to parse. Each keeps its tooltip, and the tooltip
         # is a sentence rather than a repeat of the removed word -- an icon
         # needs to be explainable, not merely named.
+        # Data-processing mode: the parameters and the video stand down and the
+        # plots take the window. Analysis and reading are two different jobs --
+        # one is done once per clip and the other for as long as it takes to
+        # understand the result -- and the second does not need the first's
+        # controls on screen. It is a view toggle, not a state change: nothing
+        # is unloaded, and everything comes back untouched.
+        self.btn_data = QPushButton()
+        self.btn_data.setObjectName("Ghost")
+        self.btn_data.setFixedSize(34, 30)
+        self.btn_data.setIconSize(QSize(17, 17))
+        self.btn_data.setCheckable(True)
+        self.btn_data.toggled.connect(self._toggle_data_mode)
+        lay.addWidget(self.btn_data)
+
         self.btn_mode = QPushButton()
         self.btn_mode.setObjectName("Ghost")
         self.btn_mode.setFixedSize(34, 30)
@@ -727,6 +854,20 @@ class MainWindow(QMainWindow):
         self._sync_header_icons()
         return h
 
+    @staticmethod
+    def _set_engaged(btn, on: bool) -> None:
+        """Mark a header toggle as currently in force.
+
+        A Qt property plus an unpolish/polish, because a dynamic property that
+        a stylesheet selects on is not re-evaluated until the widget is
+        repolished -- setting it alone changes nothing on screen.
+        """
+        if btn.property("engaged") == ("true" if on else "false"):
+            return
+        btn.setProperty("engaged", "true" if on else "false")
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
     def _sync_header_icons(self):
         """Repaint the header icons in the current theme's text colour.
 
@@ -739,7 +880,26 @@ class MainWindow(QMainWindow):
         # Each icon shows the state you would be *in* after pressing it, which
         # is the convention every OS uses for these two toggles.
         self.btn_theme.setIcon(glyph("moon" if light else "sun", col))
-        self.btn_mode.setIcon(glyph("sliders" if self.ui_mode == "simple" else "list", col))
+        # The theme toggle shows the state you would move *to*, which is the
+        # convention for a two-way switch. This one does the opposite on
+        # purpose: it is not a switch between equals, it is a disclosure
+        # control, and the useful question is "how much am I being shown right
+        # now" rather than "what would pressing this do". So the icon names the
+        # mode in force, and advanced -- the state with consequences -- also
+        # carries a tint, because an icon alone cannot say "on" from across a
+        # desk.
+        advanced = self.ui_mode == "advanced"
+        self.btn_mode.setIcon(glyph("sliders" if advanced else "list", col))
+        self._set_engaged(self.btn_mode, advanced)
+        if hasattr(self, "btn_data"):
+            on = self.btn_data.isChecked()
+            self.btn_data.setIcon(glyph("chart" if on else "layout", col))
+            self._set_engaged(self.btn_data, on)
+            self.btn_data.setToolTip(
+                "Back to the full window: parameters, video and plots"
+                if on else
+                "Data processing mode — hide the parameters and the video, "
+                "and give the whole window to the plots")
         self.btn_update.setIcon(glyph("download", col))
 
     # ---- sidebar ---------------------------------------------------------
@@ -779,13 +939,18 @@ class MainWindow(QMainWindow):
         row2 = QWidget(); rl2 = QHBoxLayout(row2); rl2.setContentsMargins(0, 0, 0, 0); rl2.setSpacing(7)
         rl2.addWidget(QLabel("CAD outline")); rl2.addWidget(HelpBadge(HELP["dxf"]))
         rl2.addStretch(1); rl2.addWidget(self.btn_dxf); rl2.addWidget(self.btn_dxf_clear)
-        c.add_widget(row2); c.add_widget(self.lbl_dxf)
+        # The drawing is advanced now. With force measured from marked leg
+        # points, a run needs no DXF at all -- markerless is the fast default
+        # and the outline is a tool for occluded footage, which is a protocol
+        # decision rather than a per-clip one.
+        c.add_widget(row2, advanced=True); c.add_widget(self.lbl_dxf, advanced=True)
 
         # Which outline in the drawing is the robot. Hidden unless the file
         # actually contains more than one candidate, which most do not.
         self.cmb_loop = QComboBox()
         self.cmb_loop.currentIndexChanged.connect(self._on_loop_changed)
-        self.row_loop = c.add_row("Outline", self.cmb_loop, HELP["dxf_outline"])
+        self.row_loop = c.add_row("Outline", self.cmb_loop, HELP["dxf_outline"],
+                                  advanced=True)
         self.row_loop.setVisible(False)
 
         self.spin_dxfscale = QDoubleSpinBox()
@@ -795,7 +960,8 @@ class MainWindow(QMainWindow):
         self.spin_dxfscale.setValue(1.0)
         self.spin_dxfscale.setPrefix("× ")
         self.spin_dxfscale.valueChanged.connect(self._on_dxf_scale)
-        c.add_row("Drawing scale", self.spin_dxfscale, HELP["dxf_scale"])
+        c.add_row("Drawing scale", self.spin_dxfscale, HELP["dxf_scale"],
+                  advanced=True)
 
         self.spin_width = QDoubleSpinBox()
         self.spin_width.setRange(0.0, 10000.0)
@@ -852,12 +1018,15 @@ class MainWindow(QMainWindow):
         self.spin_open = QSpinBox(); self.spin_open.setRange(1, 31)
         self.spin_open.setSingleStep(2); self.spin_open.setValue(3); self.spin_open.setSuffix(" px")
         self.spin_open.valueChanged.connect(self._on_param)
-        c.add_row("Despeckle", self.spin_open, HELP["despeckle"], advanced=True)
+        # Out of advanced: these two are the first dials to reach for when a
+        # mask is speckled or full of pinholes, which is a per-clip judgement
+        # made while looking at the picture, not a protocol setting.
+        c.add_row("Despeckle", self.spin_open, HELP["despeckle"])
 
         self.spin_close = QSpinBox(); self.spin_close.setRange(1, 41)
         self.spin_close.setSingleStep(2); self.spin_close.setValue(7); self.spin_close.setSuffix(" px")
         self.spin_close.valueChanged.connect(self._on_param)
-        c.add_row("Fill holes", self.spin_close, HELP["fill_holes"], advanced=True)
+        c.add_row("Fill holes", self.spin_close, HELP["fill_holes"])
 
         self.spin_minarea = QDoubleSpinBox(); self.spin_minarea.setDecimals(4)
         self.spin_minarea.setRange(0.0010, 1.0000); self.spin_minarea.setSingleStep(0.005)
@@ -1007,16 +1176,55 @@ class MainWindow(QMainWindow):
         self.lbl_beam = QLabel(""); self.lbl_beam.setObjectName("Readout")
         self.lbl_beam.setWordWrap(True)
         c.add_widget(self.lbl_beam)
+
         self.beam_rows.append(self.lbl_beam)
 
         # -------------------------------------------------- placement
         c = cards["placement"] = Card("Target placement", key="target_placement")
+        # Leg marks. Beside the hand placement rather than in the Force card:
+        # both are things you put on the picture with the mouse, both are
+        # cleared when a new clip loads, and both compete for the same clicks.
+        # Keeping them together is what makes "only one of these is armed at a
+        # time" look like a rule rather than an accident.
+        self.chk_legs = QCheckBox("Mark leg center locations")
+        self.chk_legs.stateChanged.connect(self._on_legs_toggle)
+        rlg = QWidget()
+        lg = QHBoxLayout(rlg); lg.setContentsMargins(0, 0, 0, 0); lg.setSpacing(7)
+        lg.addWidget(self.chk_legs); lg.addWidget(HelpBadge(HELP["leg_marks"]))
+        lg.addStretch(1)
+        c.add_widget(rlg)
+
+        # Arming placement is its own button rather than a side effect of the
+        # tick box. The tick governs *use* -- the same split the region has, so
+        # switching back to whole-body length does not throw away two carefully
+        # placed marks -- and "am I currently placing?" is a different question
+        # that needs its own visible answer. Rolling both into the checkbox is
+        # what produced "clicking does nothing": the mode was on and the only
+        # evidence of it was a tick box in a different panel.
+        rlg2 = QWidget()
+        lg2 = QHBoxLayout(rlg2); lg2.setContentsMargins(0, 0, 0, 0); lg2.setSpacing(7)
+        lg2.addStretch(1)
+        self.btn_legs_mark = QPushButton("Mark on video")
+        self.btn_legs_mark.setCheckable(True)
+        self.btn_legs_mark.setToolTip(
+            "Click the two leg points on the video. While this is on, the "
+            "region and the placed outline are left alone.")
+        self.btn_legs_mark.toggled.connect(self._on_legs_arm)
+        self.btn_legs_clear = QPushButton("Clear"); self.btn_legs_clear.setFixedWidth(56)
+        self.btn_legs_clear.clicked.connect(self._clear_legs)
+        lg2.addWidget(self.btn_legs_mark); lg2.addWidget(self.btn_legs_clear)
+        c.add_widget(rlg2)
+
+        self.lbl_legs = QLabel(""); self.lbl_legs.setObjectName("Hint")
+        self.lbl_legs.setWordWrap(True)
+        c.add_widget(self.lbl_legs)
+
         self.chk_manual = QCheckBox("Place the outline by hand")
         self.chk_manual.stateChanged.connect(self._on_manual_toggled)
         rowm = QWidget(); rm = QHBoxLayout(rowm); rm.setContentsMargins(0, 0, 0, 0); rm.setSpacing(7)
         rm.addWidget(self.chk_manual); rm.addWidget(HelpBadge(HELP["manual_placement"]))
         rm.addStretch(1)
-        c.add_widget(rowm)
+        c.add_widget(rowm, advanced=True)
 
         self.lbl_place = QLabel("Load a DXF to place it.")
         self.lbl_place.setObjectName("Hint")
@@ -1051,7 +1259,7 @@ class MainWindow(QMainWindow):
         rule = QFrame(); rule.setObjectName("cardRule"); rule.setFixedHeight(1)
         c.add_widget(rule)
 
-        self.chk_roi = QCheckBox("Limit tracking to a region")
+        self.chk_roi = QCheckBox("Region of Interest")
         self.chk_roi.stateChanged.connect(self._on_roi_toggle)
         rowr = QWidget(); rr = QHBoxLayout(rowr); rr.setContentsMargins(0, 0, 0, 0); rr.setSpacing(7)
         rr.addWidget(self.chk_roi); rr.addWidget(HelpBadge(HELP["roi"]))
@@ -1067,7 +1275,7 @@ class MainWindow(QMainWindow):
         ra2.setContentsMargins(0, 0, 0, 0); ra2.setSpacing(7)
         ra2.addWidget(self.chk_appearance); ra2.addWidget(HelpBadge(HELP["appearance"]))
         ra2.addStretch(1)
-        c.add_widget(rowa2)
+        c.add_widget(rowa2, advanced=True)
 
         self.btn_roi_clear = QPushButton("Clear region")
         self.btn_roi_clear.setObjectName("Ghost")
@@ -1097,7 +1305,7 @@ class MainWindow(QMainWindow):
         c.add_row("Calibration", self.spin_ppm, HELP["px_per_mm"])
 
         # -------------------------------------------------- output
-        c = cards["output"] = Card("Output", key="output")
+        c = cards["output"] = Card("Output", key="output", advanced=True)
         self.cmb_scale = QComboBox(); self.cmb_scale.addItems(["1.0 — full", "0.5 — half", "0.25 — quarter"])
         self.cmb_scale.currentIndexChanged.connect(self._reload_needed)
         c.add_row("Decode scale", self.cmb_scale, HELP["decode_scale"])
@@ -1231,7 +1439,40 @@ class MainWindow(QMainWindow):
         hh.addStretch(1)
         self.lbl_queue_count = QLabel(""); self.lbl_queue_count.setObjectName("Readout")
         hh.addWidget(self.lbl_queue_count)
+        self.btn_batch = QPushButton("Batch…")
+        self.btn_batch.setObjectName("Ghost")
+        self.btn_batch.setFixedHeight(24)
+        self.btn_batch.setToolTip(
+            "Set every clip in this folder up first — one first frame at a "
+            "time — then run them all unattended.")
+        self.btn_batch.clicked.connect(self._batch_clicked)
+        hh.addWidget(self.btn_batch)
         v.addWidget(head)
+
+        # The batch's own strip, hidden until one is running. A modal wizard
+        # was the alternative and it is the wrong shape: setting a clip up means
+        # using the segmentation card, the region and the marks, which are all
+        # in the main window. This adds a step counter and two buttons to the
+        # window you already work in rather than replacing it.
+        self.row_batch = QWidget()
+        bh = QHBoxLayout(self.row_batch)
+        bh.setContentsMargins(2, 0, 2, 0); bh.setSpacing(7)
+        self.lbl_batch = QLabel(""); self.lbl_batch.setObjectName("Readout")
+        self.lbl_batch.setWordWrap(True)
+        bh.addWidget(self.lbl_batch, 1)
+        self.btn_batch_skip = QPushButton("Skip")
+        self.btn_batch_skip.setObjectName("Ghost")
+        self.btn_batch_skip.setToolTip("Leave this clip out of the batch.")
+        self.btn_batch_skip.clicked.connect(lambda: self._batch_capture(skip=True))
+        bh.addWidget(self.btn_batch_skip)
+        self.btn_batch_next = QPushButton("Keep  →")
+        self.btn_batch_next.setToolTip(
+            "Store this clip's parameters, region and leg marks, and move to "
+            "the next first frame.")
+        self.btn_batch_next.clicked.connect(lambda: self._batch_capture(skip=False))
+        bh.addWidget(self.btn_batch_next)
+        self.row_batch.setVisible(False)
+        v.addWidget(self.row_batch)
 
         self.lbl_eta = QLabel(""); self.lbl_eta.setObjectName("Hint")
         self.lbl_eta.setWordWrap(True)
@@ -1259,6 +1500,25 @@ class MainWindow(QMainWindow):
         self.btn_export_sel.clicked.connect(self._export_selection)
         rl.addWidget(self.btn_export_sel, 1)
 
+        self.btn_reanalyze = QPushButton("Mark for re-analysis")
+        self.btn_reanalyze.setObjectName("Ghost")
+        self.btn_reanalyze.setToolTip(
+            "Clear the green dot on the selected clip, so the folder reads as "
+            "still to do. The results are left on disk.")
+        self.btn_reanalyze.clicked.connect(self._mark_for_reanalysis)
+        rl.addWidget(self.btn_reanalyze, 1)
+
+        self.btn_open_res = QPushButton("Open results folder…")
+        self.btn_open_res.setObjectName("Ghost")
+        self.btn_open_res.setToolTip(
+            "Point at an output folder. Every finished result inside it is "
+            "listed above; click one to load it into the plots, with no video. "
+            "Region selection and the force model work exactly as they do "
+            "after a run, and the force recomputes as you change the beam "
+            "constants.")
+        self.btn_open_res.clicked.connect(self._open_results_folder)
+        rl.addWidget(self.btn_open_res, 1)
+
         self.btn_next_video = QPushButton("Next video  →")
         self.btn_next_video.setObjectName("Ghost")
         self.btn_next_video.setToolTip(
@@ -1269,6 +1529,351 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.btn_next_video, 1)
         v.addWidget(row)
         return w
+
+    # ---- batch: configure every clip first, then run them all -------------
+    #
+    # A folder of twenty recordings is the normal unit of work, and doing it
+    # clip by clip means twenty rounds of "load, adjust, run, wait, come back".
+    # The waiting is the part a computer should absorb, and it can only absorb
+    # it if every decision has already been made.
+    #
+    # So the batch splits into two phases that are deliberately not
+    # interleaved. First every clip's *first frame* comes up in turn and you set
+    # its segmentation, region and leg marks -- a minute a clip, all of it
+    # attended, none of it waiting. Each one's whole configuration is captured
+    # as a RunConfig at the moment you press Keep, which is what lets the second
+    # phase be unattended: the configs are already fixed, so nothing about the
+    # run depends on the controls, which by then read whatever the last clip
+    # needed.
+    #
+    # Per-clip rather than one config for the folder, because the things being
+    # set are per-clip by nature. The robot drifts between recordings, the dish
+    # moves, the illumination changes -- one region cannot serve twenty clips,
+    # and two leg marks certainly cannot.
+
+    def _batch_clicked(self):
+        if self._batch is not None:
+            self._batch_cancel("cancelled")
+            return
+        vids = list(self._queue or [])
+        if len(vids) < 2:
+            QMessageBox.information(
+                self, "Nothing to batch",
+                "A batch needs at least two videos in the folder next to this "
+                "one.")
+            return
+        self._batch = {"paths": vids, "i": 0, "cfgs": {}, "phase": "setup",
+                       "out": "", "order": [], "failed": []}
+        self.btn_batch.setText("Cancel batch")
+        self.row_batch.setVisible(True)
+        self._log(f"batch: setting up {len(vids)} clips. Adjust each first "
+                  f"frame, then press Keep. Nothing runs until the last one.")
+        self._batch_show()
+
+    def _batch_show(self):
+        """Load the clip the batch is currently waiting on."""
+        b = self._batch
+        if b is None:
+            return
+        if b["i"] >= len(b["paths"]):
+            self._batch_setup_done()
+            return
+        path = b["paths"][b["i"]]
+        self.lbl_batch.setText(
+            f"Batch setup {b['i'] + 1} of {len(b['paths'])} — {path.name}")
+        try:
+            same = Path(path).resolve() == Path(self.video or "").resolve()
+        except OSError:
+            same = False
+        if not same:
+            self._switch_video(str(path))
+
+    def _batch_capture(self, skip: bool):
+        """Store this clip's configuration, or drop it, and move on."""
+        b = self._batch
+        if b is None:
+            return
+        path = b["paths"][b["i"]]
+        if skip:
+            self._log(f"batch: skipping {path.name}")
+        elif not self.video:
+            self._log(f"batch: {path.name} never loaded — skipping it")
+        else:
+            # outdir is filled in at run time, once, for the whole batch. The
+            # rest is frozen here.
+            cfg, _ = self._build_run_cfg("")
+            b["cfgs"][str(path)] = cfg
+            b["order"].append(str(path))
+            bits = []
+            if cfg.segment.roi:
+                bits.append("region")
+            if cfg.leg_marks:
+                bits.append("leg marks")
+            if cfg.manual_pose:
+                bits.append("hand placement")
+            self._log(f"batch: kept {path.name}"
+                      + (f" with {', '.join(bits)}" if bits else ""))
+        b["i"] += 1
+        self._batch_show()
+
+    def _batch_setup_done(self):
+        b = self._batch
+        if not b["order"]:
+            self._batch_cancel("nothing was kept")
+            return
+        out = QFileDialog.getExistingDirectory(
+            self, f"Output folder for {len(b['order'])} clips",
+            self.state.get("output_dir") or "")
+        if not out:
+            self._batch_cancel("no output folder chosen")
+            return
+        self.outdir = out
+        b["out"] = out
+        b["phase"] = "run"
+        b["i"] = 0
+        self._touch()
+        self.btn_batch_next.setEnabled(False)
+        self.btn_batch_skip.setEnabled(False)
+        self._log(f"batch: running {len(b['order'])} clips → {out}")
+        self._batch_run_next()
+
+    def _batch_run_next(self):
+        b = self._batch
+        if b is None:
+            return
+        if b["i"] >= len(b["order"]):
+            n, bad = len(b["order"]), b["failed"]
+            self._batch_cancel(None)
+            snd.finished(self.state.get("sound_enabled", True))
+            msg = f"{n - len(bad)} of {n} clips written to {self.outdir}"
+            if bad:
+                msg += "\n\nThese failed:\n" + "\n".join(bad)
+            self._log(f"batch finished — {msg.splitlines()[0]}")
+            QMessageBox.information(self, "Batch complete", msg)
+            self._refresh_queue()
+            return
+        key = b["order"][b["i"]]
+        cfg = b["cfgs"][key]
+        cfg.outdir = b["out"]
+        self.lbl_batch.setText(
+            f"Batch {b['i'] + 1} of {len(b['order'])} — {Path(key).name}")
+        self._log(f"batch [{b['i'] + 1}/{len(b['order'])}] {Path(key).name}")
+        # The window follows along so the overlay is watchable, but the run
+        # itself uses the captured config either way.
+        try:
+            same = Path(key).resolve() == Path(self.video or "").resolve()
+        except OSError:
+            same = False
+        if not same:
+            self._switch_video(key)
+        self.btn_run.setText("Abort")
+        self.btn_run.setProperty("primary", False)
+        self.btn_run.style().unpolish(self.btn_run)
+        self.btn_run.style().polish(self.btn_run)
+        self._running = True
+        self.bar.setVisible(True); self.bar.setRange(0, 0)
+        self.bar.setTextVisible(True)
+        self.bar.setFormat("starting…")
+        self._run_started = time.time()
+        self._launch_runner(cfg)
+
+    def _batch_advance(self, failed: str | None = None) -> bool:
+        """Called when a run ends. True if the batch took over from here."""
+        b = self._batch
+        if b is None or b["phase"] != "run":
+            return False
+        if failed:
+            b["failed"].append(failed)
+        b["i"] += 1
+        QTimer.singleShot(0, self._batch_run_next)
+        return True
+
+    def _batch_cancel(self, why: str | None):
+        self._batch = None
+        self.row_batch.setVisible(False)
+        self.btn_batch.setText("Batch…")
+        self.btn_batch_next.setEnabled(True)
+        self.btn_batch_skip.setEnabled(True)
+        self.lbl_batch.setText("")
+        if why:
+            self._log(f"batch: {why}")
+
+    # ---- reading a finished run back in ----------------------------------
+
+    def _open_results(self, path: str | None = None):
+        """Load a saved tracking.csv into the plots, with no video involved.
+
+        Analysis and reading are separable, and they were not: every way of
+        getting numbers on screen went through decoding a clip. Coming back to
+        a result a week later -- to pick a different window, or to see what a
+        corrected modulus does to the force -- meant re-running the whole
+        analysis to recover a table that had been written to disk the first
+        time.
+
+        The calibration comes from run_info.json beside the CSV rather than
+        from the controls in this window, because it is a property of that run
+        and the controls have almost certainly moved since.
+        """
+        if path is None:
+            start = self.outdir or self.state.get("output_dir") or ""
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open a saved tracking.csv", start,
+                "robotrack results (tracking.csv);;CSV (*.csv);;All files (*)")
+        if not path:
+            return
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not read that file", str(e))
+            return
+        if "t" not in df.columns:
+            QMessageBox.critical(
+                self, "Not a tracking table",
+                "This CSV has no 't' column, so it is not a robotrack "
+                "tracking.csv.")
+            return
+
+        info = {}
+        ip = Path(path).with_name("run_info.json")
+        if ip.exists():
+            try:
+                info = json.loads(ip.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                info = {}
+        ppm = info.get("calibration_px_per_mm")
+        um = (1000.0 / ppm) if ppm else None
+
+        self._loaded_results = {"path": path, "info": info, "df": df}
+        self._result = None                 # a table, not a Result: no subset export
+        self.btn_export_sel.setEnabled(False)
+        self.plots.set_table(df, um, "force_mn" in df.columns)
+        src = info.get("force_length_source") or "overall length"
+        self._log(f"opened {Path(path).parent.name}/{Path(path).name} — "
+                  f"{len(df)} frames"
+                  + (f", {um:.2f} µm/px" if um else ", no calibration (pixels)")
+                  + (f", force measured on {src}" if "force_mn" in df.columns else ""))
+        if info.get("force_beam_model"):
+            self._log("beam constants from the run are in run_info.json; edit "
+                      "the Force card to recompute this table's force live.")
+        if um is None:
+            self._log("no calibration was recorded with this run, so the plots "
+                      "stay in pixels and there is no force.")
+
+    def _open_results_folder(self):
+        """List every finished result in a folder, for reading without videos.
+
+        A results folder is the unit people actually come back to -- twenty
+        clips analysed on Tuesday, revisited on Friday to pick a different
+        window or re-scale a force. Asking for one tracking.csv at a time made
+        that a file dialog per clip, and the file dialog is the wrong place to
+        compare them anyway: the list of what is in the folder already exists
+        in this window.
+
+        The clip list is reused rather than duplicated. It answers "what is in
+        front of me and which of it is done", and a folder of results is the
+        same question with the answer already yes.
+        """
+        start = self.outdir or self.state.get("output_dir") or ""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Open a folder of results", start)
+        if not folder:
+            return
+        found = sorted(p for p in Path(folder).glob("*/tracking.csv"))
+        if not found:
+            QMessageBox.information(
+                self, "No results in that folder",
+                f"{Path(folder).name} has no result folders in it.\n\n"
+                "A results folder contains one sub-folder per clip, each with "
+                "a tracking.csv inside.")
+            return
+        self.outdir = folder
+        self._results_listing = [str(p) for p in found]
+        self._touch()
+        self._fill_results_list()
+        self._log(f"{len(found)} result{'s' if len(found) > 1 else ''} in "
+                  f"{Path(folder).name} — click one to open it")
+        if not self.btn_data.isChecked():
+            self._log("  tip: data processing mode gives the plots the whole "
+                      "window for this.")
+
+    def _fill_results_list(self):
+        """Put the scanned results into the clip list, in place of videos."""
+        self.list_videos.blockSignals(True)
+        self.list_videos.clear()
+        for csv in self._results_listing or []:
+            item = QListWidgetItem(Path(csv).parent.name)
+            item.setData(Qt.UserRole, csv)
+            item.setIcon(self._dot_icon(C["ok"]))
+            item.setToolTip(csv)
+            self.list_videos.addItem(item)
+        self.list_videos.blockSignals(False)
+        self.lbl_queue_count.setText(f"{len(self._results_listing or [])} results")
+        self.lbl_eta.setText("")
+
+    def _mark_for_reanalysis(self):
+        """Take the green dot off a clip without deleting its results.
+
+        The dot means "a results folder exists under the output folder", which
+        is cheap and honest and has no second state for "exists, but I do not
+        trust it". Re-running to clear it is the wrong price for a judgement
+        that takes a second to make, and deleting the folder throws away the
+        run you are judging. A marker file inside it says so instead: the
+        results stay, the dot goes, and the next run overwrites the folder and
+        the marker together.
+        """
+        item = self.list_videos.currentItem()
+        if item is None:
+            self._log("select a clip in the folder list first.")
+            return
+        stem = Path(item.data(Qt.UserRole)).stem
+        d = Path(self.outdir or "") / stem
+        if not d.is_dir():
+            self._log(f"{stem} has no results to mark.")
+            return
+        flag = d / ".needs-reanalysis"
+        try:
+            if flag.exists():
+                flag.unlink()
+                self._log(f"{stem}: marked as analyzed again.")
+            else:
+                flag.write_text("marked in the app; delete this file to undo\n",
+                                encoding="utf-8")
+                self._log(f"{stem}: marked for re-analysis — results kept.")
+        except OSError as e:
+            self._log(f"could not mark {stem}: {e}")
+            return
+        self._refresh_queue()
+        # The refresh rebuilds the list from scratch, so the row you just acted
+        # on loses its selection -- and pressing the button again is how you
+        # undo it. Put the selection back on the same clip.
+        for i in range(self.list_videos.count()):
+            it = self.list_videos.item(i)
+            if Path(it.data(Qt.UserRole) or "").stem == stem:
+                self.list_videos.setCurrentItem(it)
+                break
+
+    def _recompute_loaded_force(self):
+        """Re-derive the force column of an opened table from the Force card.
+
+        This is the whole point of opening a result without its video: the
+        modulus is the least certain number in the model and it enters
+        linearly, so a corrected E should not cost a re-tracking run. Length is
+        already measured and does not change.
+        """
+        L = getattr(self, "_loaded_results", None)
+        if not L or self.force_method() != "beam":
+            return
+        df = L["df"]
+        col = ("leg_sep_mm" if "leg_sep_mm" in df.columns and
+               np.isfinite(df["leg_sep_mm"]).any() else "length_mm")
+        if col not in df.columns or not np.isfinite(df[col]).any():
+            return
+        beam = self._beam_model()
+        f_un, deflection, rest, _ = beam.force_un(df[col].to_numpy())
+        df["force_mn"] = f_un / 1000.0
+        df["deflection_um"] = deflection * 1000.0
+        ppm = (L.get("info") or {}).get("calibration_px_per_mm")
+        self.plots.set_table(df, (1000.0 / ppm) if ppm else None, True)
 
     # ---- how long the rest of the folder will take -----------------------
 
@@ -1464,7 +2069,9 @@ class MainWindow(QMainWindow):
         if not self.outdir:
             return False
         try:
-            return (Path(self.outdir) / video.stem).is_dir()
+            d = Path(self.outdir) / video.stem
+            # A folder that has been marked for re-analysis reads as not done.
+            return d.is_dir() and not (d / ".needs-reanalysis").exists()
         except OSError:
             return False
 
@@ -1486,6 +2093,13 @@ class MainWindow(QMainWindow):
         return QIcon(pm)
 
     def _refresh_queue(self):
+        # A scanned results folder owns the list until a clip is loaded, at
+        # which point the list goes back to describing videos.
+        if getattr(self, "_results_listing", None):
+            if not self.video:
+                self._fill_results_list()
+                return
+            self._results_listing = None
         vids = self._sibling_videos()
         self._queue = vids
         self.list_videos.blockSignals(True)
@@ -1532,6 +2146,24 @@ class MainWindow(QMainWindow):
         path = item.data(Qt.UserRole)
         if not path:
             return
+        # In data-processing mode the video pane is not on screen, so clicking a
+        # clip can only sensibly mean "show me what this one measured". Opening
+        # the clip instead would decode a file to render it into a pane that is
+        # hidden, which is the slow way to do nothing.
+        # A scanned result is stored as its own csv path, so it opens whatever
+        # mode the window is in -- the list is not showing videos at that point,
+        # and there is nothing else clicking one could mean.
+        if path.lower().endswith(".csv"):
+            self._open_results(path)
+            return
+        if getattr(self, "btn_data", None) and self.btn_data.isChecked():
+            csv = Path(self.outdir or "") / Path(path).stem / "tracking.csv"
+            if csv.exists():
+                self._open_results(str(csv))
+            else:
+                self._log(f"no results for {Path(path).name} yet — "
+                          f"nothing at {csv}")
+            return
         try:
             same = Path(path).resolve() == Path(self.video or "").resolve()
         except OSError:
@@ -1555,7 +2187,7 @@ class MainWindow(QMainWindow):
         placement across would seed the next fit at a position measured in a
         different frame, which is worse than starting with no seed at all.
         """
-        if getattr(self, "_running", False):
+        if getattr(self, "_running", False) and self._batch is None:
             QMessageBox.information(
                 self, "Analysis running",
                 "Stop the current analysis before loading another video.")
@@ -1615,6 +2247,7 @@ class MainWindow(QMainWindow):
         self.view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.view.setMinimumSize(440, 320)
         self.view.roiChanged.connect(self._on_roi_drawn)
+        self.view.legsChanged.connect(self._on_legs_marked)
         self.view.poseChanged.connect(self._on_pose_dragged)
         self.view.poseCommitted.connect(self._on_pose_committed)
         v.addWidget(self.view, 1)
@@ -1667,6 +2300,9 @@ class MainWindow(QMainWindow):
             manual_threshold=None if self.cmb_thr.currentIndex() == 0
             else float(self.spin_thr.value()),
             roi=tuple(self._active_roi() or ()) or None,
+            # The preview and the playback worker segment frames directly, with
+            # no Segmenter to work it out for them.
+            roi_scale=self._scale(),
         )
 
     def _fit_cfg(self) -> FitConfig:
@@ -1757,6 +2393,7 @@ class MainWindow(QMainWindow):
             "show_outline": check(self.chk_fit),
             "manual_placement": check(self.chk_manual),
             "roi_enabled": check(self.chk_roi),
+            "leg_marks_enabled": check(self.chk_legs),
             "check_updates_on_start": check(self.chk_update_start),
         }
 
@@ -1768,6 +2405,7 @@ class MainWindow(QMainWindow):
         st["dxf_path"] = self.dxf or ""
         st["output_dir"] = self.outdir or ""
         st["roi"] = list(self.roi) if self.roi else None
+        st["leg_marks"] = [list(p) for p in self.legs] if self.legs else None
         st["ui_mode"] = self.ui_mode
         st["collapsed_sections"] = dict(self.collapsed_sections)
         st["traj_hz"] = float(self.plots.spin_traj.value())
@@ -1810,6 +2448,14 @@ class MainWindow(QMainWindow):
             self._loading_state = False
         self.spin_thr.setEnabled(self.cmb_thr.currentIndex() == 1)
         self._sync_placement_ui()
+        # Marks live outside _bindings() -- they are picture coordinates, not a
+        # widget value -- so restoring one has to push it at the view by hand.
+        if hasattr(self, "chk_legs"):
+            self.legs = norm_leg_marks(st.get("leg_marks")) or None
+            self.btn_legs_mark.setEnabled(self.chk_legs.isChecked())
+            self.view.set_legs(self._legs_to_preview(self.legs)
+                               if self.chk_legs.isChecked() else None, edit=False)
+            self._sync_legs_label()
 
     def _wire_persistence(self) -> None:
         """Every control writes settings when it changes. Connected after the
@@ -1829,6 +2475,7 @@ class MainWindow(QMainWindow):
                    self.spin_conf, self.spin_gapms, self.spin_ppm,
                    self.cmb_scale, self.chk_overlay, self.chk_gpu,
                    self.chk_mask, self.chk_fit, self.chk_manual,
+                   self.chk_legs,
                    self.chk_update_start]
         for w in widgets:
             for signal_name in ("valueChanged", "currentIndexChanged", "stateChanged"):
@@ -2128,6 +2775,8 @@ class MainWindow(QMainWindow):
         if self.force_method() != "beam":
             self.lbl_beam.setText("")
             return
+        if getattr(self, "_loaded_results", None) and not self._loading_state:
+            self._recompute_loaded_force()
         b = self._beam_model()
         self.lbl_beam.setText(
             f"I = {b.I_mm4:.5f} mm⁴   ·   leg {b.L_leg_mm:.3f} mm   ·   "
@@ -2191,6 +2840,41 @@ class MainWindow(QMainWindow):
         s = self._preview_scale()
         p = list(pose)
         return [p[0] * s, p[1] * s, p[2], p[3] * s, p[4] * s]
+
+    # The preview draws at the decode scale, so everything handed to it has to
+    # be in *preview* pixels -- which the pose already was and the region and
+    # the leg marks were not. At decode scale 0.5 the drawn region was twice the
+    # size of the one being applied, which is a control that lies about what it
+    # does. Stored state stays at full resolution, as it must to survive a
+    # change of scale; only the trip to and from the picture is converted.
+
+    def _roi_to_preview(self, roi):
+        if not roi:
+            return None
+        s = self._preview_scale() or 1.0
+        v = [float(x) for x in roi]
+        out = [v[0] * s, v[1] * s, v[2] * s, v[3] * s]
+        return out + ([v[4]] if len(v) > 4 else [])      # an angle is not a length
+
+    def _roi_to_full(self, roi):
+        if not roi:
+            return None
+        s = self._preview_scale() or 1.0
+        v = [float(x) for x in roi]
+        out = [v[0] / s, v[1] / s, v[2] / s, v[3] / s]
+        return out + ([v[4]] if len(v) > 4 else [])
+
+    def _legs_to_preview(self, legs):
+        if not legs:
+            return None
+        s = self._preview_scale() or 1.0
+        return [[float(x) * s, float(y) * s] for x, y in legs]
+
+    def _legs_to_full(self, legs):
+        if not legs:
+            return None
+        s = self._preview_scale() or 1.0
+        return [[float(x) / s, float(y) / s] for x, y in legs]
 
     def _pose_to_full(self, pose):
         if pose is None:
@@ -2322,6 +3006,12 @@ class MainWindow(QMainWindow):
             self._log(text)
 
     def _on_run_frame(self, index: int, img):
+        # Overlay frames from the run already carry the tracked marks, so the
+        # placed pair comes off the picture. Which pair is on screen is decided
+        # by whoever supplies the frame rather than by tracking "is a run going"
+        # separately -- the frame either has the marks drawn into it or it does
+        # not, and that is the only thing the question depends on.
+        self.view.set_legs_live(self._active_legs() is not None)
         """Show the frame the analysis is on, with its outline drawn."""
         if img is None:
             return
@@ -2352,11 +3042,12 @@ class MainWindow(QMainWindow):
         self._debounce.stop()
         self.btn_play.setText("❚❚")
         self._retire("_player")
+        marks = self._active_legs()
         self._player = PlaybackWorker(
             self.reader, self.model, self.background, self._seg_cfg(),
             self.slider.value(), self.chk_mask.isChecked(),
             self.chk_gpu.isChecked(), self.info.measured_fps * self._speed(),
-            view=self._view_mode())
+            view=self._view_mode(), leg_marks=marks)
         self._player.frame.connect(self._on_play_frame)
         self._player.finished_at.connect(self._on_play_end)
         self._player.start()
@@ -2367,6 +3058,7 @@ class MainWindow(QMainWindow):
             self._player.wait(2000)
 
     def _on_play_frame(self, i, t, img, status):
+        self.view.set_legs_live(self._active_legs() is not None)
         h, w = img.shape[:2]
         qi = QImage(img.data, w, h, 3 * w, QImage.Format_BGR888).copy()
         self.view.set_frame(QPixmap.fromImage(qi), (w, h))
@@ -2499,10 +3191,15 @@ class MainWindow(QMainWindow):
 
     def _on_roi_toggle(self, *_):
         on = self.chk_roi.isChecked()
+        # Turning the region on ends leg marking, so the two are never armed at
+        # once. Whichever the user reached for last is the one that gets the
+        # clicks; the other keeps its shape and simply stops being editable.
+        if on and getattr(self, "btn_legs_mark", None) and self.btn_legs_mark.isChecked():
+            self.btn_legs_mark.setChecked(False)
         # Hidden entirely when off, rather than shown-but-frozen. A region that
         # still dimmed the frame while doing nothing was most of why "off" did
         # not look like off.
-        self.view.set_roi(self.roi if on else None, edit=on)
+        self.view.set_roi(self._roi_to_preview(self.roi) if on else None, edit=on)
         if on and not self.roi:
             self._log("drag on the video to draw the region to track inside; "
                       "then drag its edges to resize, or the grip above it to rotate.")
@@ -2516,7 +3213,7 @@ class MainWindow(QMainWindow):
 
     def _on_roi_drawn(self, roi):
         was = list(self.roi) if self.roi else None
-        self.roi = list(roi) if roi else None
+        self.roi = self._roi_to_full(roi)
         self._sync_roi_label()
         self._touch()
         # The region is not just a clip: the medium's color and the robot's are
@@ -2541,6 +3238,110 @@ class MainWindow(QMainWindow):
         self._sync_roi_label()
         self._touch()
         self._render_preview()
+
+    # ---- leg marks -------------------------------------------------------
+
+    def _active_legs(self):
+        """The pair the analysis should use, or None.
+
+        Same rule as the region: the tick box governs *use*, not merely
+        drawing. Two marks left on the picture with the box unticked must not
+        quietly keep changing which quantity the force is computed from.
+        """
+        if not getattr(self, "chk_legs", None) or not self.chk_legs.isChecked():
+            return None
+        return [list(p) for p in self.legs] if self.legs else None
+
+    def _on_legs_toggle(self, *_):
+        # The checkbox is restored from settings before the viewer necessarily
+        # exists, and stateChanged fires on setChecked, so this can run early.
+        if not hasattr(self, "view"):
+            return
+        on = self.chk_legs.isChecked()
+        self.btn_legs_mark.setEnabled(on)
+        if on and not self.legs:
+            # Ticking the box with nothing marked can only mean one thing, so
+            # arming is automatic rather than a second step to discover.
+            self.btn_legs_mark.setChecked(True)
+        elif not on:
+            self.btn_legs_mark.setChecked(False)
+        self.view.set_legs(self._legs_to_preview(self.legs) if on else None,
+                           edit=on and self.btn_legs_mark.isChecked())
+        self._sync_legs_label()
+        self._touch()
+        self._render_preview()
+
+    def _on_legs_arm(self, on: bool):
+        """Enter or leave marking. Marking owns the picture while it is on."""
+        if not hasattr(self, "view"):
+            return
+        self.btn_legs_mark.setText("Done marking" if on else "Mark on video")
+        self.view.set_legs(self._legs_to_preview(self.legs), edit=on)
+        # The region stops being editable while marking, and gets its handles
+        # back afterwards. It stays *drawn* and stays applied -- this suspends
+        # editing, not the region itself.
+        self.view.set_roi(self.view.roi,
+                          edit=(not on) and bool(getattr(self, "chk_roi", None)
+                                                 and self.chk_roi.isChecked()))
+        if on:
+            self._log("click the two leg points on the video. The force is then "
+                      "computed from how far they close, not from the robot's "
+                      "overall length. Drag either mark to adjust it, then press "
+                      "Done marking.")
+        self._render_preview()
+
+    def _on_legs_marked(self, legs):
+        self.legs = self._legs_to_full(legs)
+        self._sync_legs_label()
+        self._touch()
+
+    def _clear_legs(self):
+        self.legs = None
+        self.view.set_legs(None, edit=self.btn_legs_mark.isChecked())
+        self._sync_legs_label()
+        self._touch()
+        self._render_preview()
+
+    def _legs_span_mm(self) -> float | None:
+        """The marks' separation in mm, if the run would have a scale for it."""
+        if not self.legs or len(self.legs) != 2:
+            return None
+        k = self._um_per_px()
+        if not k:
+            return None
+        (ax, ay), (bx, by) = self.legs
+        return float(np.hypot(ax - bx, ay - by)) * k / 1000.0
+
+    def _sync_legs_label(self):
+        on = bool(getattr(self, "chk_legs", None) and self.chk_legs.isChecked())
+        if not self.legs or len(self.legs) != 2:
+            self.lbl_legs.setText(
+                "Force is measured from the robot's overall length, which "
+                "changes less than the legs do — mark the two ends of the beam "
+                "to measure their closure directly." if on else
+                "Force is measured from the robot's overall length.")
+            return
+        span = self._legs_span_mm()
+        if not on:
+            self.lbl_legs.setText(
+                "Two marks are saved but not in use — tick the box to measure "
+                "from them again.")
+            return
+        if span is None:
+            self.lbl_legs.setText(
+                "Two marks placed. Their separation is the measurement; it will "
+                "be reported in millimetres once the run has a scale.")
+            return
+        # Against the beam model's own leg-to-leg span, which is what the marks
+        # are supposed to be. Saying it here rather than only after the run is
+        # the difference between fixing a misplaced mark now and discovering it
+        # in the summary of a forty-minute analysis.
+        L = self.spin_Lleg2leg.value()
+        off = span / L - 1.0 if L > 0 else 0.0
+        note = (f" — {100 * off:+.0f}% from the beam model's leg-to-leg span of "
+                f"{L:.3f} mm, which scales the force by about the same"
+                if abs(off) > 0.05 else " — consistent with the beam model's span")
+        self.lbl_legs.setText(f"Marks are {span:.3f} mm apart{note}.")
 
     def _sync_roi_label(self):
         on = bool(getattr(self, "chk_roi", None) and self.chk_roi.isChecked())
@@ -2592,9 +3393,38 @@ class MainWindow(QMainWindow):
             self.chk_roi.setChecked(False)
         self.view.set_roi(None, edit=False)
         self._sync_roi_label()
+        # Leg marks are pixel coordinates in one recording, exactly like the
+        # region, so they go the same way. A mark carried to the next clip lands
+        # on whatever happens to be at those pixels and tracks it perfectly.
+        if self.legs:
+            self._log("leg marks cleared — they were placed on the previous clip")
+        self.legs = None
+        if hasattr(self, "chk_legs"):
+            self.chk_legs.setChecked(False)
+        if hasattr(self, "btn_legs_mark"):
+            self.btn_legs_mark.setChecked(False)
+        self.view.set_legs(None, edit=False)
+        self._sync_legs_label()
         self.plots.reset()
 
     # ---- appearance ------------------------------------------------------
+
+    def _toggle_data_mode(self, on: bool):
+        """Hide or restore the parameter and video columns."""
+        if not hasattr(self, "_split"):
+            return
+        if on:
+            # Remembered rather than recomputed, so leaving and re-entering the
+            # mode puts the splitter back exactly where it was rather than at
+            # whatever the default happened to be.
+            self._split_sizes = self._split.sizes()
+        self._col_params.setVisible(not on)
+        self._col_video.setVisible(not on)
+        if not on and getattr(self, "_split_sizes", None):
+            self._split.setSizes(self._split_sizes)
+        self.state["data_mode"] = bool(on)
+        self._sync_header_icons()
+        self._touch()
 
     def _sync_theme_button(self):
         light = self.state.get("theme_mode", "dark") == "light"
@@ -2848,6 +3678,87 @@ class MainWindow(QMainWindow):
     def _log(self, msg: str):
         self.log.append(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+        self._log_to_file(msg)
+
+    def _install_crash_logging(self) -> None:
+        """Send every unhandled traceback to the log file.
+
+        A windowed build has no console. An exception raised inside a Qt slot
+        is printed to a stderr that does not exist and the program carries on
+        looking merely stuck, which is precisely the failure being chased here:
+        a load that never starts and never says why. Both hooks are installed,
+        because the interesting one may be on a worker thread.
+        """
+        import threading
+
+        def _hook(exc_type, exc, tb):
+            import traceback as _tb
+            self._log_to_file("UNHANDLED: " + "".join(
+                _tb.format_exception(exc_type, exc, tb)))
+            _prev(exc_type, exc, tb)
+
+        _prev = sys.excepthook
+        sys.excepthook = _hook
+        if hasattr(threading, "excepthook"):
+            _prev_t = threading.excepthook
+
+            def _thook(args):
+                import traceback as _tb
+                self._log_to_file("UNHANDLED (thread " + str(args.thread) + "): "
+                                  + "".join(_tb.format_exception(
+                                      args.exc_type, args.exc_value, args.exc_traceback)))
+                _prev_t(args)
+            threading.excepthook = _thook
+
+    def _log_to_file(self, msg: str) -> None:
+        """Mirror the log panel to a file, with wall-clock timestamps.
+
+        The panel is fine while you are watching it and useless afterwards: it
+        is gone when the window closes, it cannot be attached to a message, and
+        it says nothing about *when* each line appeared -- which is the only
+        thing that matters when the complaint is "it never finished". A run of
+        lines with a ninety-second gap in the middle names the slow stage
+        without anybody having to reproduce anything.
+
+        Best effort and size-capped. A logger that can fail a launch, or fill a
+        disk, is worse than no logger.
+        """
+        try:
+            f = U.user_dir() / "robotrack.log"
+            if f.exists() and f.stat().st_size > 2_000_000:
+                f.replace(f.with_suffix(".log.1"))
+            with open(f, "a", encoding="utf-8", errors="replace") as fh:
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+        except OSError:
+            pass
+
+    # ---- watchdog: name the stage that is taking the time ------------------
+
+    def _stage(self, name: str) -> None:
+        """Record what the app is currently waiting on."""
+        self._stage_name = name
+        self._stage_started = time.time()
+        if not self._stage_timer.isActive():
+            self._stage_timer.start()
+
+    def _stage_done(self) -> None:
+        self._stage_name = ""
+        self._stage_timer.stop()
+
+    def _stage_tick(self) -> None:
+        """Say so, every ten seconds, while a stage is still running.
+
+        Two rounds of this were spent guessing at a hang from a description,
+        and both guesses were wrong. A line every ten seconds naming the stage
+        and its elapsed time turns "it never opens" into "it sat in the colour
+        estimate for forty minutes", which is a different and answerable
+        problem.
+        """
+        if not self._stage_name:
+            self._stage_timer.stop()
+            return
+        el = time.time() - self._stage_started
+        self._log(f"  … still {self._stage_name} — {el:.0f} s so far")
 
     def _set_enabled(self, on: bool):
         for x in (self.btn_run, self.slider, self.chk_mask, self.chk_fit,
@@ -2992,15 +3903,62 @@ class MainWindow(QMainWindow):
         self._set_enabled(False)
         self.view.set_frame(None, (0, 0))
         self.view.set_pose(None, editable=False)
-        self.view.setText("building background model…")
+        self.view.setText("opening video…")
         self._retire("_loader")
-        self._loader = LoadWorker(self.video, self._scale(), self._seg_cfg(),
-                                  self.chk_gpu.isChecked())
-        self._loader.note.connect(self._log)
-        self._loader.done.connect(self._loaded)
-        self._loader.start()
+        self._log(f"opening {Path(self.video).name}")
+        self._stage(f"opening {Path(self.video).name}")
+        # Step by step, into the log file.
+        #
+        # The log said "still opening" every ten seconds for two and a half
+        # minutes and the worker's own first line -- which it emits before it
+        # touches the file -- never appeared. That means the thread never ran,
+        # which means something between here and .start() threw, and a windowed
+        # build has no stderr for a slot's traceback to land in. So each step
+        # says so, and anything that throws is written down rather than lost.
+        try:
+            self._log_to_file("  reload: reading control values")
+            scale, seg, gpu = self._scale(), self._seg_cfg(), self.chk_gpu.isChecked()
+            self._log_to_file(f"  reload: scale={scale} gpu={gpu} roi={seg.roi}")
+            self._loader = LoadWorker(self.video, scale, seg, gpu)
+            self._log_to_file("  reload: worker built")
+            self._loader.note.connect(self._on_load_note)
+            self._loader.done.connect(self._loaded)
+            self._loader.started.connect(
+                lambda: self._log_to_file("  reload: worker thread entered run()"))
+            self._log_to_file("  reload: signals connected, starting thread")
+            self._loader.start()
+            self._log_to_file("  reload: start() returned")
+            # QThread.start() returning says nothing about whether the thread
+            # actually got going. Ask again a second later, from the GUI thread.
+            QTimer.singleShot(1000, self._loader_health)
+        except Exception:
+            self._stage_done()
+            tb = traceback.format_exc()
+            self._log_to_file(tb)
+            self._log(f"could not start the load: {tb.strip().splitlines()[-1]}")
+            self.view.setText("failed to start loading")
+
+    def _loader_health(self):
+        w = getattr(self, "_loader", None)
+        if w is None:
+            self._log_to_file("  reload: loader was already cleared")
+            return
+        self._log_to_file(f"  reload: 1 s later isRunning={w.isRunning()} "
+                          f"isFinished={w.isFinished()}")
+
+    def _on_load_note(self, msg: str):
+        """A load note is also a statement about which stage is now running."""
+        self._log(msg)
+        low = msg.lower()
+        if low.startswith("probing"):
+            self._stage("probing the file")
+        elif low.startswith("measuring color"):
+            self._stage("measuring colour separation")
+        elif low.startswith("building background"):
+            self._stage("building the background plate")
 
     def _loaded(self, info, reader, bg, model, err):
+        self._stage_done()
         if err:
             self.view.set_frame(None, (0, 0))
             self.view.setText("failed to load")
@@ -3093,9 +4051,15 @@ class MainWindow(QMainWindow):
             view=self._view_mode())
         self._preview.done.connect(self._preview_done)
         self._preview_busy = True
+        self._stage("rendering the first frame")
         self._preview.start()
 
     def _preview_done(self, img, status, err, fitted):
+        self._stage_done()
+        # A freshly rendered preview has nothing drawn into it, so the placed
+        # marks come back. This is also what restores them after a run ends,
+        # without a teardown step that could be missed on the abort path.
+        self.view.set_legs_live(False)
         self._preview_busy = False
         if err:
             self._log(err.strip().splitlines()[-1])
@@ -3162,32 +4126,22 @@ class MainWindow(QMainWindow):
         self.bar.setFormat("")
         self.plots.stop_live()
         self._reset_run_button()
+        # Abort means the person is back at the keyboard and wants it to stop,
+        # not "skip this one and carry on with nineteen more".
+        if self._batch is not None:
+            self._batch_cancel("stopped; the clips already written are kept")
         snd.stopped(self.state.get("sound_enabled", True))
         self._log(f"aborted — {why}. No results were written.")
 
-    def _run(self):
-        # The same button aborts. Two buttons would mean one of them is disabled
-        # and useless at any given moment, and the one you want is whichever the
-        # run is not currently doing.
-        if getattr(self, "_running", False):
-            if self._runner is not None:
-                self.btn_run.setEnabled(False)
-                self.btn_run.setText("Stopping…")
-                self._log("abort requested — finishing the current frame")
-                self._runner.abort()
-            return
-        if not self.video:
-            return
-        out = QFileDialog.getExistingDirectory(self, "Choose an output folder",
-                                               self.state.get("output_dir") or "")
-        if not out:
-            return
-        self.outdir = out
-        self._touch()
-        # The green dots are "a results folder exists under here", so they are
-        # only meaningful once "here" is known -- and they change wholesale when
-        # it changes.
-        self._refresh_queue()
+    def _build_run_cfg(self, out: str):
+        """Everything the current controls say, as one RunConfig.
+
+        Split out of ``_run`` so a batch can capture a clip's whole
+        configuration at the moment it is set up and replay it, unchanged,
+        an hour later. A batch that re-read the live controls at run time
+        would apply whatever the last clip was configured with to all of
+        them, silently.
+        """
         manual = (list(self.manual_pose)
                   if (self.manual_pose and self.chk_manual.isChecked()
                       and self.template is not None) else None)
@@ -3222,8 +4176,35 @@ class MainWindow(QMainWindow):
             px_per_mm=self.spin_ppm.value() or None,
             scale=self._scale(), write_overlay=self.chk_overlay.isChecked(),
             gpu=self.chk_gpu.isChecked(), manual_pose=manual,
+            leg_marks=self._active_legs(),
             segment=self._seg_cfg(), fit=self._fit_cfg(), analysis=self._ana_cfg(),
         )
+        return cfg, manual
+
+    def _run(self):
+        # The same button aborts. Two buttons would mean one of them is disabled
+        # and useless at any given moment, and the one you want is whichever the
+        # run is not currently doing.
+        if getattr(self, "_running", False):
+            if self._runner is not None:
+                self.btn_run.setEnabled(False)
+                self.btn_run.setText("Stopping…")
+                self._log("abort requested — finishing the current frame")
+                self._runner.abort()
+            return
+        if not self.video:
+            return
+        out = QFileDialog.getExistingDirectory(self, "Choose an output folder",
+                                               self.state.get("output_dir") or "")
+        if not out:
+            return
+        self.outdir = out
+        self._touch()
+        # The green dots are "a results folder exists under here", so they are
+        # only meaningful once "here" is known -- and they change wholesale when
+        # it changes.
+        self._refresh_queue()
+        cfg, manual = self._build_run_cfg(out)
         if manual:
             self._log("seeding the fit from the hand-placed outline")
         # Say out loud which region this run used. A region is invisible in the
@@ -3268,21 +4249,31 @@ class MainWindow(QMainWindow):
                 self.bar.setVisible(False)
                 return
         self.view.set_pose(None, editable=False)
+        self._launch_runner(cfg)
+
+    def _launch_runner(self, cfg):
+        """Hand one RunConfig to a worker and wire it to the window.
+
+        Everything here is read off the config rather than off the controls,
+        because a batch replays a config captured an hour earlier and the
+        controls have moved on to the next clip since.
+        """
         # Force needs a *calibration*, not just a method: it is computed from
         # length in millimetres, and with no ruler there are no millimetres.
         # Claiming a force panel here and then losing the column at the end made
         # the panel appear during the run and vanish the moment it finished,
         # which reads as the plot breaking rather than as a missing input.
-        can_calibrate = bool(self._true_width_mm() or self.spin_ppm.value())
-        will_have_force = can_calibrate and (
-            self.force_method() == "beam"
-            or (self.force_method() == "lut" and self.lut is not None))
-        if self.force_method() != "none" and not can_calibrate:
+        width_mm = cfg.known_width_mm or (
+            self.template.width_mm if (self.template is not None and cfg.dxf) else None)
+        can_calibrate = bool(width_mm or cfg.px_per_mm)
+        will_have_force = can_calibrate and cfg.force_method in ("beam", "lut")
+        if cfg.force_method != "none" and not can_calibrate:
             self._log("no force this run: it needs a calibration, and neither a "
                       "drawing, a true width nor a px/mm figure is set")
-        self.plots.start_live(um_per_px=self._um_per_px(),
-                              has_force=will_have_force,
-                              width_mm=self._true_width_mm())
+        self.plots.start_live(
+            um_per_px=(1000.0 / cfg.px_per_mm) if cfg.px_per_mm else None,
+            has_force=will_have_force,
+            width_mm=width_mm)
         self._retire("_runner")
         self._runner = RunWorker(cfg)
         self._runner.progress.connect(self._on_progress)
@@ -3312,9 +4303,15 @@ class MainWindow(QMainWindow):
         self.plots.stop_live()
         self._reset_run_button()
         if err:
+            # A batch does not stop for one bad clip and does not raise a modal
+            # dialog for it either -- the whole point is that nobody is there.
+            # The failure is logged, listed at the end, and the batch goes on.
+            line = err.strip().splitlines()[-1]
+            self._log(line)
+            if self._batch_advance(failed=f"{Path(self.video).name}: {line}"):
+                return
             snd.stopped(self.state.get("sound_enabled", True))
             QMessageBox.critical(self, "Analysis failed", err)
-            self._log(err.strip().splitlines()[-1])
             return
         # Rising chime before the dialog, not after: the dialog blocks, and the
         # whole point is to be heard by someone who has walked away from it.
@@ -3338,6 +4335,8 @@ class MainWindow(QMainWindow):
         self._persist()
         # Refresh the dots: the clip that just finished now has a folder.
         self._refresh_queue()
+        if self._batch_advance():
+            return
         box = QMessageBox(self)
         box.setWindowTitle("Analysis complete")
         box.setText(f"Written to {pipeline_output_dir(self.outdir, self.video)}")

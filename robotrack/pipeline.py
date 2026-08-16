@@ -18,6 +18,7 @@ from .gpu import Device, get_device, verify_device
 from .ingest import VideoInfo, probe
 from .kinematics import (AnalysisConfig, derivative, dominant_frequency,
                          gate_and_fill, path_length, smooth)
+from .legpoints import parse_marks as parse_leg_marks
 from .register import FitConfig, ShapeFitter
 from .segment import SegmentConfig, Segmenter
 from .shape import measure_mask
@@ -112,6 +113,12 @@ class RunConfig:
     # *full-resolution* image pixels. Kept at full resolution so one placement
     # stays valid when the decode scale changes.
     manual_pose: list[float] | None = None
+    # Two points marked on the robot's legs, in *full-resolution* image pixels
+    # on the reference frame, as ((ax, ay), (bx, by)). When set, the distance
+    # between them is tracked frame by frame and becomes the length the beam
+    # model measures its deflection from -- see legpoints.py for why the whole
+    # body's length is the wrong quantity for that and this is the right one.
+    leg_marks: object = None
     # Appearance lock. When set, the pose comes from aligning a reference patch
     # rather than from fitting the drawing to a color mask -- the path to take
     # on footage where the robot and the medium are not separable per pixel.
@@ -144,6 +151,13 @@ class Result:
     lut_clamped: int = 0
     beam: object = None
     force_method: str = "none"
+    # Which series the deflection was measured on: "leg points" or
+    # "overall length". Carried on the result rather than inferred at display
+    # time, because the two answer differently by about 25% and a force printed
+    # without saying which it came from cannot be reproduced.
+    force_source: str = ""
+    leg_marks: list | None = None
+    leg_lost: int = 0
     resting_length_mm: float = float("nan")
     aspect_measured: float = float("nan")
     aspect_drawn: float = float("nan")
@@ -205,8 +219,18 @@ class Result:
                 lines.append(f"  proportions      : {self.aspect_measured:.2f} vs "
                              f"{self.aspect_drawn:.2f} drawn — consistent")
         if "feature_fit" in t and np.isfinite(_nanmedian(t.feature_fit)):
-            lines.append(f"  interior features: {100 * _nanmedian(t.feature_fit):.0f}% "
+            ff = _nanmedian(t.feature_fit)
+            lines.append(f"  interior features: {100 * ff:.0f}% "
                          f"of interior points on an observed edge")
+            if ff < 0.15:
+                lines.append(
+                    f"  WARNING          : at {100 * ff:.0f}% the interior features "
+                    f"are matching almost nothing, so they are adding points to "
+                    f"every solver iteration without steering it. This is usually "
+                    f"most of why a run is slow. Untick 'Fit interior features' "
+                    f"under Shape fitting, and check the drawing scale — a "
+                    f"figure this low often means the drawing and the robot are "
+                    f"not the same size.")
         if np.isfinite(self.width_ref_px):
             lines.append(f"  width (ruler)    : {self.width_ref_px:.1f} px on frame "
                          f"{self.width_ref_frame} — this frame sets the scale")
@@ -240,7 +264,16 @@ class Result:
                 if self.force_method == "beam":
                     lines.append(f"  force (beam)     : {1000 * lo:.0f} .. {1000 * hi:.0f} uN "
                                  f"({lo:.3f} .. {hi:.3f} mN)")
+                    lines.append(f"  measured on      : "
+                                 f"{self.force_source or 'overall length'}"
+                                 + ("" if self.force_source == "leg points" else
+                                    " — the legs close further than the body "
+                                    "shortens, so this reads low; mark the two "
+                                    "leg points to measure the closure itself"))
                     lines.append(f"  resting length   : {self.resting_length_mm:.4f} mm")
+                    if self.leg_lost:
+                        lines.append(f"  leg marks held   : {self.leg_lost} frame(s) "
+                                     f"could not be solved")
                     if self.beam is not None:
                         lines.append(f"  {self.beam.summary()}")
                     if self.lut_clamped:
@@ -298,6 +331,32 @@ def _as_outlines(o) -> list:
     return [o] if len(o) > 2 else []
 
 
+def _draw_leg_marks(img, rec) -> None:
+    """The two tracked marks and the line between them, on one frame.
+
+    Drawn wherever a frame is drawn -- the live preview during a run and every
+    frame of overlay.mp4 -- because this is the only way to see that the marks
+    are still on the legs. The numbers cannot show it: a mark that slid off onto
+    the medium keeps producing a perfectly smooth separation trace, of the wrong
+    thing. Watching the two dots stay put is the check.
+
+    Its own colour, not the fit's. The green outline is a measured boundary and
+    these are a measured distance, and they are answering different questions.
+    """
+    ax, ay = rec.get("leg_ax"), rec.get("leg_ay")
+    bx, by = rec.get("leg_bx"), rec.get("leg_by")
+    if ax is None or bx is None or not all(np.isfinite(v) for v in (ax, ay, bx, by)):
+        return
+    # Amber when the frame held its last position rather than solving, so a run
+    # of held frames is visible as a colour change and not only in the log.
+    col = (176, 212, 76) if rec.get("leg_ok", True) else (60, 190, 250)
+    a, b = (int(ax), int(ay)), (int(bx), int(by))
+    cv2.line(img, a, b, col, 1, cv2.LINE_AA)
+    for pt in (a, b):
+        cv2.circle(img, pt, 6, col, 2, cv2.LINE_AA)
+        cv2.circle(img, pt, 1, col, -1, cv2.LINE_AA)
+
+
 def _overlay_frame(m, rec, fitted_outline, max_px: int = 900):
     """Compose the mask contour and fitted outline onto one frame, for the GUI.
 
@@ -320,6 +379,7 @@ def _overlay_frame(m, rec, fitted_outline, max_px: int = 900):
         cx, cy = rec.get("cx"), rec.get("cy")
         if cx is not None and np.isfinite(cx):
             cv2.circle(img, (int(cx), int(cy)), 4, col, -1, cv2.LINE_AA)
+    _draw_leg_marks(img, rec)
     h, w = img.shape[:2]
     if max_px and max(w, h) > max_px:
         k = max_px / float(max(w, h))
@@ -426,6 +486,14 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         if getattr(tracker, "clipped", ""):
             notes.append(tracker.clipped)
 
+    # Leg-point tracking. Built lazily on the first frame that has a signal
+    # rather than here, because the reference patches have to be cut from the
+    # same surface every later frame is matched against -- and that surface is
+    # produced by the segmenter, one frame at a time.
+    legs = None
+    leg_marks = parse_leg_marks(cfg.leg_marks)
+    leg_failed = ""
+
     t_seg = t_fit = t_draw = 0.0
     t_mark = time.time()
     for m in seg:
@@ -433,6 +501,48 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
             raise RunAborted(f"stopped after {len(rows)} frames")
         t_seg += time.time() - t_mark
         rec = {"frame": m.index, "t": m.t, "area_px": m.area_px}
+
+        if leg_marks is not None and legs is None and not leg_failed:
+            sig0 = _fit_signal(m, seg)
+            if sig0 is not None:
+                from .legpoints import LegTracker
+                try:
+                    legs = LegTracker(sig0, leg_marks, scale=cfg.scale)
+                except ValueError as e:
+                    leg_failed = str(e)
+                    notes.append(f"leg points not tracked: {e}. Force falls back "
+                                 f"to the robot's overall length.")
+                if legs is not None:
+                    # The signal the marks are matched against is zero outside
+                    # the region -- the segmenter confines its work to that box
+                    # and leaves the rest untouched. A mark placed outside it is
+                    # therefore matched against flat nothing, holds its position
+                    # for the whole clip, and produces a perfectly smooth
+                    # separation trace of two stationary points. Nothing about
+                    # that looks wrong, so it is said out loud here.
+                    from .segment import roi_rect
+                    r = roi_rect(cfg.segment, sig0.shape[1], sig0.shape[0],
+                                 getattr(cfg.segment, "roi_scale", 1.0))
+                    if r is not None:
+                        x, y, w, h = r
+                        for name, (mx, my) in zip("AB", ((legs.pos[0]), (legs.pos[1]))):
+                            if not (x <= mx <= x + w and y <= my <= y + h):
+                                notes.append(
+                                    f"leg mark {name} is outside the region. The "
+                                    f"surface the marks are tracked on is blank "
+                                    f"outside it, so this mark cannot move and "
+                                    f"the separation it reports is not a "
+                                    f"measurement. Move the mark inside the "
+                                    f"region, or widen the region to include it.")
+        if legs is not None:
+            s = legs.track(_fit_signal(m, seg))
+            # Decoded pixels, like every other _px column here. The calibration
+            # is derived from width_px on the same decoded frames, so a leg
+            # separation converted to full resolution would be divided by a
+            # scale it does not share and come out wrong by exactly cfg.scale.
+            rec.update(leg_ax=s.ax, leg_ay=s.ay, leg_bx=s.bx, leg_by=s.by,
+                       leg_sep_px=s.separation_px, leg_ok=bool(s.ok),
+                       leg_a_conf=s.cc_a, leg_b_conf=s.cc_b)
         if tracker is not None:
             t0 = time.time()
             pose = tracker.track(m.frame) if m.frame is not None else None
@@ -520,15 +630,60 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     if t.empty:
         raise RuntimeError("No frames were processed.")
 
+    if fitter is not None and t is not None and "confidence" in t:
+        conf = float(np.nanmedian(t["confidence"])) if len(t) else float("nan")
+        if np.isfinite(conf) and conf < 0.75:
+            notes.append(
+                f"the fit never settled — median confidence {conf:.2f}. A frame "
+                f"that does not reach a confident pose cannot be trusted to warm "
+                f"start the next one, so the solver falls back to its full cold "
+                f"schedule instead of the short warm one. That is roughly thirty "
+                f"times the work per frame, and it is why this run was slow "
+                f"rather than a separate problem to solve. Tighten the region, "
+                f"place the outline by hand on frame 1, or -- if the force comes "
+                f"from leg marks -- drop the drawing and run markerless.")
+
+    if legs is not None and legs.n_lost:
+        frac = legs.n_lost / max(len(rows), 1)
+        msg = (f"{legs.n_lost} of {len(rows)} frames ({100 * frac:.0f}%) could "
+               f"not solve one of the leg marks and held the previous position. "
+               f"A held frame is a flat spot in the separation, so it shallows "
+               f"any contraction it lands in.")
+        if frac > 0.10:
+            msg += (" At this rate the leg-point series is not trustworthy — "
+                    "re-mark on a frame where both legs are clearly visible.")
+        notes.append(msg)
+
     # --- occlusion gating, then physical-time smoothing -----------------------
     conf = t.confidence.to_numpy()
     tt = t.t.to_numpy()
-    for col in ("cx", "cy", "width_px", "length_px"):
+    gated = ["cx", "cy", "width_px", "length_px"]
+    for col in gated:
         filled, bad = gate_and_fill(t[col].to_numpy(), conf, tt, cfg.analysis)
         t[col + "_raw"] = t[col]
         t[col] = smooth(filled, info, cfg.analysis)
         if col == "cx":
             t["occluded"] = bad
+
+    if "leg_sep_px" in t:
+        # Gated on the leg tracker's own verdict, not the shape fit's.
+        #
+        # It used to borrow ``confidence`` from the fit, on the reasoning that a
+        # frame the run had already called untrustworthy should not re-enter
+        # through another column. That reasoning is stale: the two now measure
+        # different things. The fit describes how well an outline sits on the
+        # silhouette; the marks are two image patches matched independently of
+        # it, and on a clip where segmentation is failing they are typically the
+        # only thing still working. Borrowing the fit's verdict threw away good
+        # leg data on exactly the runs that had nothing else -- and, worse, did
+        # it by interpolation, so the discarded frames came back as a smooth
+        # invented curve rather than as a gap.
+        ok_arr = t["leg_ok"].to_numpy().astype(float) if "leg_ok" in t else None
+        if ok_arr is not None:
+            filled, bad = gate_and_fill(t["leg_sep_px"].to_numpy(), ok_arr, tt,
+                                        cfg.analysis)
+            t["leg_sep_px_raw"] = t["leg_sep_px"]
+            t["leg_sep_px"] = smooth(filled, info, cfg.analysis)
 
     # --- calibration: the robot's own width, on the reference frame -----------
     #
@@ -632,6 +787,10 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     t["length_um"] = t["length_mm"] * 1000.0
     t["length_strain"] = t["length_px"] / rest_px if rest_px else np.nan
 
+    if "leg_sep_px" in t:
+        t["leg_sep_mm"] = t["leg_sep_px"] / unit
+        t["leg_sep_um"] = t["leg_sep_mm"] * 1000.0
+
     t["cx_mm"], t["cy_mm"] = t.cx / unit, t.cy / unit
     t["path_length"] = path_length(t.cx_mm.to_numpy(), t.cy_mm.to_numpy())
     t["path_length_um"] = t["path_length"] * 1000.0
@@ -641,6 +800,7 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
     # --- force ---------------------------------------------------------------
     lut, beam, n_clamped = None, None, 0
     rest_mm = float("nan")
+    force_source = ""
     method = cfg.force_method or ("lut" if cfg.force_lut else "none")
     if method == "lut" and cfg.force_lut:
         from .forcelut import load_lut
@@ -649,12 +809,47 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
         t["force_mn"] = force
     elif method == "beam" and cfg.beam is not None and px_per_mm:
         beam = cfg.beam
-        f_un, deflection, rest_mm, n_clamped = beam.force_un(t["length_mm"].to_numpy())
+        # Which series the deflection is measured on. The beam model's delta is
+        # the closure between the legs, so marked leg points are the quantity it
+        # actually asks for and the body's length is a proxy that under-reports
+        # it -- by 24% on the clip this was validated against. Marks win when
+        # they exist and the log says which was used, because a force with no
+        # statement of what was measured is not reproducible.
+        if "leg_sep_mm" in t and np.isfinite(t["leg_sep_mm"]).any():
+            series, force_source = t["leg_sep_mm"].to_numpy(), "leg points"
+        else:
+            series, force_source = t["length_mm"].to_numpy(), "overall length"
+        f_un, deflection, rest_mm, n_clamped = beam.force_un(series)
         # Stored in mN so both methods share one column, one axis and one set of
         # region statistics. The model's natural unit is uN and that is what the
         # literature quotes, so it is reported both ways in the summary.
         t["force_mn"] = f_un / 1000.0
         t["deflection_um"] = deflection * 1000.0
+
+        # Where the marks were put is now part of the measurement, so it gets
+        # checked. The model's delta is the closure of the beam's two ends, and
+        # every other term is written for that same pair of points: L is the
+        # leg-to-leg span and theta = asin((delta/2)/L_leg) is the angle a leg
+        # of length L_leg swings through to produce it. Marks further out along
+        # the legs swing further for the same rotation and report a larger
+        # delta than the model is asking for, marks inboard a smaller one, and
+        # neither shows up as anything but a plausible force.
+        #
+        # The check is free because the model already states the answer: at
+        # rest, two correctly placed marks are L_mm apart. That turns "did I
+        # mark the right feature" from a judgement call into an arithmetic
+        # identity the run can verify on its own.
+        if force_source == "leg points" and np.isfinite(rest_mm) and beam.L_mm > 0:
+            off = rest_mm / beam.L_mm - 1.0
+            if abs(off) > 0.05:
+                notes.append(
+                    f"the leg marks sit {rest_mm:.3f} mm apart at rest, "
+                    f"{100 * off:+.0f}% from the beam model's leg-to-leg span of "
+                    f"{beam.L_mm:.3f} mm. Force scales with the closure these two "
+                    f"points measure, so marks further out along the legs read "
+                    f"high and marks inboard read low, both by roughly this "
+                    f"proportion. Either mark the beam's two ends, or set "
+                    f"'Leg to leg' to the span you actually marked.")
     elif method == "beam" and not px_per_mm:
         # Force is computed from length in millimetres. With no ruler there are
         # no millimetres, so there is no force -- but dropping the column
@@ -702,6 +897,9 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
                  width_ref_px=width_ref_px, width_ref_frame=width_ref_frame,
                  lut=lut, lut_clamped=n_clamped, beam=beam,
                  force_method=method, resting_length_mm=rest_mm,
+                 force_source=force_source,
+                 leg_marks=list(leg_marks[0]) + list(leg_marks[1]) if leg_marks else None,
+                 leg_lost=(legs.n_lost if legs is not None else 0),
                  aspect_measured=aspect_ratio, aspect_drawn=aspect_drawn,
                  stage_times={"decode+segment": t_seg, "fit": t_fit,
                               "live preview": t_draw,
@@ -738,7 +936,18 @@ def run(cfg: RunConfig, progress=None, on_row=None, on_frame=None,
             "force_lut": (lut.summary() if lut else None),
             "force_beam_model": (beam.to_dict() if beam else None),
             "force_resting_length_mm": (rest_mm if beam else None),
+            "force_length_source": (force_source or None),
             "force_frames_clamped": n_clamped,
+            "leg_marks": (list(leg_marks[0]) + list(leg_marks[1])
+                          if leg_marks else None),
+            # nanmax over an all-NaN column warns and returns nan; a run whose
+            # marks never solved has no resting separation to report, and None
+            # says that without a warning on the way past.
+            "leg_rest_separation_mm": (
+                float(np.nanmax(t["leg_sep_mm"]))
+                if ("leg_sep_mm" in t and np.isfinite(t["leg_sep_mm"]).any())
+                else None),
+            "leg_frames_held": (legs.n_lost if legs is not None else None),
             "axis_ranges": cfg.axis_ranges or None,
             "region_analysis": (cfg.axis_ranges or {}).get("selection_stats") or None,
             "processing_fps": res.fps_processed,
@@ -958,14 +1167,39 @@ def _overlay(info: VideoInfo, reader: FrameReader, t: pd.DataFrame,
         k = max_px / float(max(src_w, src_h))
     out_w, out_h = int(src_w * k) // 2 * 2, int(src_h * k) // 2 * 2
 
-    vw = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"),
-                         info.measured_fps, (out_w, out_h))
+    # A writer that could not open is not an exception, it is an object whose
+    # every write() quietly does nothing -- so the run reported success and left
+    # an unplayable file. macOS resolves .mp4 through AVFoundation rather than
+    # the FFMPEG backend Windows uses, and is stricter about odd frame rates,
+    # which is exactly what a measured 119.88 fps is. Try the container's own
+    # rate, then a rounded one, then avc1, and say so if none of them open.
+    fps = float(info.measured_fps or 30.0)
+    vw = None
+    for fourcc, rate in (("mp4v", fps), ("mp4v", round(fps)), ("avc1", round(fps))):
+        w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*fourcc),
+                            max(rate, 1.0), (out_w, out_h))
+        if w.isOpened():
+            vw = w
+            break
+        w.release()
+    if vw is None:
+        raise RuntimeError(
+            f"could not open a video writer for {path.name} at {out_w}x{out_h}. "
+            f"The data and the figure are written; only the overlay video is "
+            f"missing. Untick 'Write overlay video' under Output to skip it.")
     color_reader = FrameReader(info, reader.backend, scale=reader.scale, color=True)
     conf = dict(zip(t.frame, t.confidence))
     # One dict lookup per frame instead of a DataFrame scan. The old version ran
     # ``t[t.frame == i]`` inside the loop, which is a full-table comparison per
     # frame and grows with clip length on top of the encode cost.
     length = dict(zip(t.frame, t.length_px))
+    # The marks go into the exported video too, at the same reduced scale. This
+    # is the artefact people actually look at weeks later, and a separation
+    # trace with no picture of where it was measured is not reviewable.
+    legs = ({} if "leg_ax" not in t else
+            {int(r.frame): (r.leg_ax * k, r.leg_ay * k, r.leg_bx * k, r.leg_by * k,
+                            bool(getattr(r, "leg_ok", True)))
+             for r in t.itertuples()})
     total = info.n_frames or len(t)
     for i, ts, frame in color_reader:
         img = frame if k == 1.0 else cv2.resize(frame, (out_w, out_h),
@@ -976,6 +1210,13 @@ def _overlay(info: VideoInfo, reader: FrameReader, t: pd.DataFrame,
             col = (0, 255, 0) if c >= 0.5 else (0, 165, 255)
             cv2.polylines(img, [(o * k).astype(np.int32)
                                 for o in _as_outlines(outlines[i])], True, col, 2)
+        lg = legs.get(i)
+        if lg is not None and all(np.isfinite(v) for v in lg[:4]):
+            col2 = (76, 212, 176) if lg[4] else (60, 190, 250)
+            a2, b2 = (int(lg[0]), int(lg[1])), (int(lg[2]), int(lg[3]))
+            cv2.line(img, a2, b2, col2, 1, cv2.LINE_AA)
+            for pt in (a2, b2):
+                cv2.circle(img, pt, 6, col2, 2, cv2.LINE_AA)
         L = length.get(i)
         if L is not None and np.isfinite(L):
             cv2.putText(img, f"t={ts:6.3f}s  L={L * k:6.1f}px  conf={conf.get(i, 0.0):.2f}",

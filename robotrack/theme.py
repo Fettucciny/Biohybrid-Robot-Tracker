@@ -31,7 +31,7 @@ from __future__ import annotations
 import math
 from contextlib import contextmanager
 
-from PySide6.QtCore import Qt, QPoint, QPointF, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, Signal
 from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPainterPath,
                            QPen, QPixmap, QPolygonF)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy,
@@ -45,6 +45,11 @@ from . import mea_theme as M
 
 ACCENT_NAME = "myo"
 ACCENT = "#FF5470"          # crimson-rose
+# The accent at low alpha, for a toggle that is *engaged* rather than merely
+# hovered. A border alone cannot say "this mode is on" while the cursor is
+# elsewhere, and a filled accent would make a header toggle louder than the
+# Run button.
+ACCENT_SOFT = "rgba(255, 84, 112, 0.20)"
 
 # --------------------------------------------------------------------------
 # Light mode
@@ -251,10 +256,21 @@ QToolButton#Help:hover {{
 /* ---- ghost button (secondary, non-committal actions) ---- */
 QPushButton#Ghost {{
     background: transparent;
-    border: 1px dashed {M.LINE};
+    border: 1px solid {M.LINE};
     color: {M.TEXT_MUTED};
 }}
-QPushButton#Ghost:hover {{ color: {M.TEXT}; border-color: {ACCENT}; }}
+/* Solid and a point heavier under the cursor. A dashed hover border reads as
+   "this control is provisional", which is exactly wrong for the header
+   toggles, and a 1 px accent edge is easy to miss on a dark strip. */
+QPushButton#Ghost:hover {{
+    color: {M.TEXT};
+    border: 2px solid {ACCENT};
+}}
+QPushButton#Ghost[engaged="true"] {{
+    background: {ACCENT_SOFT};
+    border: 1px solid {ACCENT};
+    color: {M.TEXT};
+}}
 
 /* ---- preview surface: the loudest thing on screen should be the data ---- */
 QLabel#Viewer {{
@@ -472,6 +488,14 @@ def glyph(name: str, color: str | None = None, size: int = 18) -> QIcon:
             p.setBrush(col)
             p.drawEllipse(QPointF(14, y), 3.6, 3.6)
             p.setBrush(Qt.NoBrush)
+    elif name == "chart":                   # data processing mode is ON
+        p.drawPolyline(QPolygonF([QPointF(16, 16), QPointF(16, 84), QPointF(88, 84)]))
+        p.drawPolyline(QPolygonF([QPointF(30, 64), QPointF(46, 40),
+                                  QPointF(62, 56), QPointF(82, 26)]))
+    elif name == "layout":                  # back to the full three-column window
+        p.drawRect(QRectF(14, 18, 72, 64))
+        p.drawLine(QPointF(38, 18), QPointF(38, 82))
+        p.drawLine(QPointF(62, 18), QPointF(62, 82))
     elif name == "download":                # update
         p.drawLine(QPointF(50, 14), QPointF(50, 60))
         p.drawPolyline(QPolygonF([QPointF(30, 42), QPointF(50, 62), QPointF(70, 42)]))

@@ -118,6 +118,16 @@ DEFAULTS: dict[str, Any] = {
     # careful placement -- and so a settings file can never describe a region
     # that is silently in force with its own control unticked.
     "roi_enabled": False,
+    # Two points marked on the robot's legs, [[ax, ay], [bx, by]] in
+    # full-resolution image px, and whether they are applied. Same split as the
+    # region and for the same reason: switching the measurement back to the
+    # robot's overall length must not throw away two carefully placed marks,
+    # and a config file must never describe marks that are silently in force
+    # with their own control unticked. They change which physical quantity the
+    # reported force is a function of, so that matters more here than it does
+    # for a region.
+    "leg_marks": None,
+    "leg_marks_enabled": False,
     "traj_hz": 0.0,                 # trajectory sampling rate; 0 = every frame
 
     # --- updates ---------------------------------------------------------

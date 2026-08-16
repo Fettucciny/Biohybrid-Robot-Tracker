@@ -44,6 +44,14 @@ def _search_dirs() -> list[Path]:
                 break
     here = Path(__file__).resolve().parent
     dirs += [here / "bin", here.parent / "bin", here.parent / "launcher" / "bin"]
+    if sys.platform == "darwin":
+        # Homebrew's prefixes, explicitly. LaunchServices does not give a GUI
+        # process the PATH a login shell has, so an app started from the Dock or
+        # a shortcut sees neither /opt/homebrew/bin (Apple Silicon) nor
+        # /usr/local/bin (Intel) -- and install_macos.sh installs ffmpeg with
+        # brew. The result was an app that worked when launched from Terminal
+        # and could not find its decoder any other way.
+        dirs += [Path("/opt/homebrew/bin"), Path("/usr/local/bin")]
     return dirs
 
 

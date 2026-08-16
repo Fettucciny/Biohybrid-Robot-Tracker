@@ -483,7 +483,8 @@ class PlotPanel(QWidget):
         self.configure(um_per_px, has_force)
         cols = [c for c in ("t", "length_px", "length_strain", "force_mn",
                             "path_length", "confidence", "cx", "cy",
-                            "width_px") if c in df.columns]
+                            "width_px", "leg_a_conf", "leg_b_conf")
+                if c in df.columns]
         self._rows = df[cols].to_dict("records")
         self._home.clear()
         self._redraw()
@@ -500,6 +501,14 @@ class PlotPanel(QWidget):
         t = np.array([r.get("t", np.nan) for r in self._rows], float)
         length_px = np.array([r.get("length_px", np.nan) for r in self._rows], float)
         conf = np.array([r.get("confidence", np.nan) for r in self._rows], float)
+        # The two marks' own match quality, when the run tracked them. Plotted
+        # beside the fit's confidence rather than instead of it: they answer
+        # different questions, and when the force is measured from the marks
+        # these are the two curves that say whether to believe it.
+        ca = np.array([r.get("leg_a_conf", np.nan) for r in self._rows], float)
+        cb = np.array([r.get("leg_b_conf", np.nan) for r in self._rows], float)
+        self._leg_conf = (ca, cb) if (np.isfinite(ca).any()
+                                      or np.isfinite(cb).any()) else None
 
         live_k = self._live_um_per_px()      # None once the run has finished
         if live_k and not self.um_per_px:
@@ -583,6 +592,14 @@ class PlotPanel(QWidget):
                 ax.plot(t, dy, lw=1.1, color=col[2], label="y")
                 ax.axhline(0.0, lw=0.7, color=THEME["muted"], alpha=0.6)
                 ax.legend(loc="upper left", fontsize=6, framealpha=0.25, ncol=3)
+            elif key == "conf":
+                ax.plot(t, y, lw=1.3, color=c, label="fit")
+                lc = getattr(self, "_leg_conf", None)
+                if lc is not None:
+                    ax.plot(t, 100.0 * lc[0], lw=1.0, color=col[1], label="A")
+                    ax.plot(t, 100.0 * lc[1], lw=1.0, color=col[2], label="B")
+                    ax.legend(loc="lower left", fontsize=6, framealpha=0.25,
+                              ncol=3)
             else:
                 ax.plot(t, y, lw=1.3, color=c)
             ax.grid(alpha=0.18)

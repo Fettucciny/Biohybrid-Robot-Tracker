@@ -135,7 +135,7 @@ def run_with_splash(argv, startup_warning: str | None = None) -> int:
     import pandas  # noqa: F401
     import scipy.signal  # noqa: F401
 
-    splash.step(f"ready on {dev.name[:34]}" if dev.cuda else "ready (CPU only)")
+    splash.step(f"ready on {dev.name[:34]}" if dev.accelerated else "ready (CPU only)")
     from .gui import MainWindow
 
     splash.step("building the window…")

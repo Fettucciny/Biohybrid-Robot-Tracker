@@ -390,7 +390,21 @@ def load_dxf(path: str | Path, n_points: int = 400, flatten_mm: float = 0.05,
                     feats.append(_resample_closed(v, n))
 
     pts = _resample_closed(outer, n_points)
-    pts -= pts.mean(axis=0)
+    # One origin for everything this function returns.
+    #
+    # This is the arc-length centroid of the outline, taken from the
+    # *resampled* polygon; the interior features and the drawn loops below are
+    # shifted by the same vector. They used to be centred on
+    # ``outer.mean(axis=0)`` instead -- the mean of the raw DXF vertices -- and
+    # that is a different point, sometimes very different. A rounded rectangle
+    # exported as nine vertices has most of them bunched at one end, so their
+    # mean sits nowhere near the shape's centre: on the reference drawing the
+    # two origins are 0.81 mm apart, 5.6% of the part's width. The outline then
+    # fitted the robot correctly while every interior feature sat off to one
+    # side, always by the same amount and always in the same direction -- which
+    # is exactly what it looked like.
+    origin = pts.mean(axis=0)
+    pts = pts - origin
 
     # Validate before anything downstream touches it. Everything after this --
     # the SVD, the normals, the distance grid, the fitter's scale limits --
@@ -417,13 +431,13 @@ def load_dxf(path: str | Path, n_points: int = 400, flatten_mm: float = 0.05,
 
     feature_pts = None
     if feats:
-        f = np.vstack(feats) - outer.mean(axis=0)
+        f = np.vstack(feats) - origin
         feature_pts = (f @ R.T).astype(np.float32)
 
     return Template(
         points=pts.astype(np.float32),
         normals=outward_normals(pts),
-        closed_loops=[(l - outer.mean(axis=0)) @ R.T for l in all_pts],
+        closed_loops=[(l - origin) @ R.T for l in all_pts],
         units=units,
         width_mm=float(np.ptp(pts[:, 0])),
         length_mm=float(np.ptp(pts[:, 1])),

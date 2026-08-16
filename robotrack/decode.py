@@ -144,8 +144,14 @@ class FrameReader:
         shape = (self.height, self.width, 3) if self.color else (self.height, self.width)
         ts = self.info.timestamps
         t0 = float(ts[0]) if ts is not None and ts.size else 0.0
+        # stderr is discarded, not piped. A pipe nobody reads is a deadlock
+        # waiting for a chatty decoder: fill the 64 KB buffer and ffmpeg blocks
+        # on write while this loop blocks on stdout, with no timeout on either
+        # side. Hardware decoders emit per-frame complaints on marginal streams
+        # -- VideoToolbox on 10-bit HEVC phone footage especially -- and this
+        # is the one decode path with no timeout to break the tie.
         proc = _popen(self._cmd(None), stdout=subprocess.PIPE,
-                      stderr=subprocess.PIPE, bufsize=self._frame_bytes * 4)
+                      stderr=subprocess.DEVNULL, bufsize=self._frame_bytes * 4)
         i = 0
         try:
             while True:
@@ -179,7 +185,20 @@ class FrameReader:
         return np.frombuffer(r.stdout[: self._frame_bytes], np.uint8).reshape(shape).copy()
 
     def _keyframes(self, limit_s: float = 90.0) -> np.ndarray:
-        """Decode only this clip's keyframes, in one pass."""
+        """Decode only this clip's keyframes, in one pass.
+
+        The filter chain here is exactly the one the streaming path uses, and
+        deliberately so. 0.37.1 added a second ``scale`` filter to this command
+        to decode keyframes small for the colour estimate; on a CPU decoder that
+        is correct and roughly free, and on a hardware decoder it is a filter
+        graph that may not accept the frames it is handed. When it does not,
+        this returns nothing, ``sample`` falls through to its last resort -- a
+        full sequential decode of the entire clip -- and opening a 4K recording
+        stops looking slow and starts looking hung. Making the fast path depend
+        on an untested interaction with whichever decoder the machine happens to
+        have was the mistake; the colour estimate now gets its saving from
+        subsampling pixels in numpy, where no decoder has an opinion.
+        """
         shape = (self.height, self.width, 3) if self.color else (self.height, self.width)
         cmd = [ffmpeg(), "-v", "error", "-nostdin", "-skip_frame", "nokey",
                *self.backend.args, "-i", self.info.path,
@@ -191,11 +210,29 @@ class FrameReader:
             r = _run(cmd, capture_output=True, timeout=limit_s)
         except (subprocess.TimeoutExpired, OSError):
             return np.empty((0, *shape), np.uint8)
-        count = len(r.stdout) // self._frame_bytes
+        nbytes = int(np.prod(shape))
+        count = len(r.stdout) // nbytes
         if count == 0:
+            # ffmpeg's own verdict, which this used to throw away in favour of
+            # measuring the output length. An option the local ffmpeg rejects
+            # produces no frames and a non-zero status, and reporting only "no
+            # frames" sends the caller down the full-decode path with no idea
+            # why -- which is exactly how a broken command line came to look
+            # like a video that would not open.
+            self.last_error = (
+                f"keyframe pass returned no frames (exit {r.returncode}): "
+                + (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[-1]
+                if getattr(r, "stderr", None) else
+                f"keyframe pass returned no frames (exit {r.returncode})")
             return np.empty((0, *shape), np.uint8)
-        buf = np.frombuffer(r.stdout[: count * self._frame_bytes], np.uint8)
+        buf = np.frombuffer(r.stdout[: count * nbytes], np.uint8)
         return buf.reshape(count, *shape).copy()
+
+    # Which route the last sample() took. A class attribute so it is always
+    # readable, including before anything has been sampled.
+    sample_path = "not sampled"
+    # Why the fast path produced nothing, when it produced nothing.
+    last_error = ""
 
     def sample(self, n: int) -> np.ndarray:
         """Grab ``n`` frames spread across the clip.
@@ -210,6 +247,9 @@ class FrameReader:
         file with a broken index.
         """
         n = max(int(n), 1)
+        # Which route this call ended up taking, for the caller to report. The
+        # three differ by orders of magnitude and by nothing else visible.
+        self.sample_path = "keyframes"
 
         # Keyframes first. They are spread across the clip by construction, and
         # decoding only them skips all inter-frame reconstruction: 35 frames in
@@ -221,6 +261,7 @@ class FrameReader:
         if len(kf) >= max(8, n // 3):
             if len(kf) > n:
                 kf = kf[np.linspace(0, len(kf) - 1, n).astype(int)]
+            self.sample_path = "keyframes"
             return kf
 
         dur = self.info.duration_s or (self.info.n_frames /
@@ -231,8 +272,17 @@ class FrameReader:
             times = np.linspace(0.0, dur * 0.995, n)
             out = [f for f in (self.read_at(float(t)) for t in times) if f is not None]
             if out:
+                self.sample_path = "seeks"
                 return np.stack(out)
 
+        # Last resort: a full sequential decode of the entire clip to pick out
+        # ``n`` frames. It is correct and it is catastrophically slow -- minutes
+        # on a long 4K recording, and indistinguishable from a hang because
+        # nothing above it says a word. Reaching it means both fast paths
+        # failed, which is a fault worth naming rather than absorbing: 0.37.1
+        # broke the keyframe command on hardware decoders and the only symptom
+        # anyone saw was a video that never opened.
+        self.sample_path = "full decode"
         idx = np.unique(np.linspace(0, max(self.info.n_frames - 1, 0), n).astype(int))
         want = set(int(x) for x in idx)
         out = [f for i, _, f in self if i in want]

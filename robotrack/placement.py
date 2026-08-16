@@ -63,7 +63,17 @@ ROI_CURSORS = {
 # answers "what would a click here do" in one lookup.
 HOVER_CURSORS = dict(ROI_CURSORS)
 HOVER_CURSORS.update({"move": Qt.OpenHandCursor, "length": Qt.CrossCursor,
-                      "width": Qt.CrossCursor, "roi_new": Qt.CrossCursor})
+                      "width": Qt.CrossCursor, "roi_new": Qt.CrossCursor,
+                      "leg0": Qt.SizeAllCursor, "leg1": Qt.SizeAllCursor,
+                      "leg_new": Qt.CrossCursor})
+
+# Matches ``border-radius`` on QLabel#Viewer in theme.py. The two have to be
+# the same number; a frame drawn square inside a rounded panel shows the panel
+# background at each corner.
+VIEWER_RADIUS = 12.0
+
+LEG_R = 6.0             # radius of a leg mark, widget pixels
+LEG_LABELS = ("A", "B")
 
 
 def transform_points(pts: np.ndarray, pose) -> np.ndarray:
@@ -97,6 +107,26 @@ def _norm_roi(roi) -> tuple | None:
             round(float(ang), 2))
 
 
+def norm_leg_marks(legs) -> list | None:
+    """Any accepted spelling of the leg marks -> [[x, y], ...], or None.
+
+    Accepts the flat four-number form as well as the nested pair, because a
+    settings file is hand-editable and a ``.rtcfg`` written by a build that
+    spelled it either way is a record of a real experiment. One placed mark is
+    a legal intermediate state -- it is what the widget holds between the two
+    clicks -- so a single point is kept rather than discarded.
+    """
+    if legs is None:
+        return None
+    try:
+        v = [float(t) for t in np.ravel(np.asarray(legs, dtype=float))]
+    except (TypeError, ValueError):
+        return None
+    if len(v) not in (2, 4) or not all(math.isfinite(t) for t in v):
+        return None
+    return [[v[i], v[i + 1]] for i in range(0, len(v), 2)]
+
+
 def local_to_image(pose, lx: float, ly: float) -> tuple[float, float]:
     """One point given in template units -> image pixels."""
     tx, ty, th, sx, sy = [float(v) for v in pose]
@@ -116,6 +146,7 @@ class PreviewView(QLabel):
     poseChanged = Signal(object)        # emitted live while dragging
     poseCommitted = Signal(object)      # emitted once, on mouse release
     roiChanged = Signal(object)         # (x, y, w, h) in image px, or None
+    legsChanged = Signal(object)        # [[ax, ay], [bx, by]] in image px, or None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -150,6 +181,18 @@ class PreviewView(QLabel):
         self._roi_grab = (0.0, 0.0)     # cursor offset from centre, at grab time
         self._roi_start: tuple | None = None
 
+        # The two leg marks, in *image* pixels, as [[ax, ay], [bx, by]] -- or a
+        # one-element list while the first has been placed and the second has
+        # not. Image space for the same reason the region and the pose are: the
+        # widget resizes and the decode scale changes, and neither should move
+        # a mark off the leg it was put on.
+        self.legs: list | None = None
+        self.legs_edit = False
+        self._leg_drag: int | None = None
+        # True while the frames arriving already have the tracked marks drawn
+        # into them, so the static placement is not drawn on top of them.
+        self.legs_live = False
+
     # ---- content ---------------------------------------------------------
 
     def set_accent(self, hex_color: str) -> None:
@@ -162,6 +205,28 @@ class PreviewView(QLabel):
         self.setCursor(Qt.CrossCursor if (self.roi_edit and self.roi is None)
                        else Qt.ArrowCursor)
         self.update()
+
+    def set_legs(self, legs, edit: bool | None = None) -> None:
+        self.legs = norm_leg_marks(legs)
+        if edit is not None:
+            self.legs_edit = bool(edit)
+        self.update()
+
+    def set_legs_live(self, on: bool) -> None:
+        self.legs_live = bool(on)
+        self.update()
+
+    def leg_marks(self) -> list | None:
+        """The pair, or None while fewer than two have been placed."""
+        return [list(p) for p in self.legs] if self.legs and len(self.legs) == 2 else None
+
+    # ---- leg marks -------------------------------------------------------
+
+    def _leg_hit(self, pos: QPointF) -> str | None:
+        for i, (x, y) in enumerate(self.legs or []):
+            if _near(self._to_widget(x, y), pos, GRAB_SLOP):
+                return f"leg{i}"
+        return None
 
     # ---- region geometry -------------------------------------------------
 
@@ -292,6 +357,18 @@ class PreviewView(QLabel):
         p.setRenderHint(QPainter.Antialiasing)
         z, ox, oy = self._fit()
         w, h = self._image_size
+
+        # The viewer is a rounded panel and a video frame is a rectangle, so
+        # the frame's square corners overhung the panel's curve by a few pixels
+        # on all four sides. Clipping the paint to the same rounded rectangle
+        # the stylesheet draws makes the two agree instead of nearly agreeing,
+        # which on a dark corner is more obviously wrong than a large error
+        # somewhere else would be.
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1),
+                            VIEWER_RADIUS, VIEWER_RADIUS)
+        p.setClipPath(clip)
+
         p.drawPixmap(QRectF(ox, oy, w * z, h * z), self._frame,
                      QRectF(self._frame.rect()))
 
@@ -321,8 +398,13 @@ class PreviewView(QLabel):
             outside.addRect(full)
             inside = QPainterPath()
             inside.addPolygon(poly)
+            # Dimmed, not blacked out. At alpha 110 everything outside the
+            # region went to near-silhouette, so you could no longer see what
+            # you had excluded or judge whether the edge was in the right
+            # place -- which is exactly the moment you want to look at it. 38
+            # is enough to read as "outside" while leaving the picture legible.
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 110))
+            p.setBrush(QColor(0, 0, 0, 38))
             p.drawPath(outside.subtracted(inside))
 
             p.setPen(QPen(roi_col, 2.0, Qt.DashLine))
@@ -341,6 +423,8 @@ class PreviewView(QLabel):
                     c = self._roi_point(u, v)
                     p.drawRect(QRectF(c.x() - ROI_HANDLE, c.y() - ROI_HANDLE,
                                       2 * ROI_HANDLE, 2 * ROI_HANDLE))
+
+        self._paint_legs(p)
 
         if self.pose is None or self.template is None:
             return
@@ -377,6 +461,59 @@ class PreviewView(QLabel):
             r = HANDLE_R - 0.5
             p.drawRect(QRectF(hs["width"].x() - r, hs["width"].y() - r, 2 * r, 2 * r))
 
+    def _paint_legs(self, p: QPainter) -> None:
+        """The two marks, and the line whose length is the measurement.
+
+        Drawn in a colour of their own rather than the accent the outline and
+        the region share. All three overlays can be on the picture at once, and
+        the marks are the one that changes what the reported force *means* --
+        telling them apart at a glance is worth a second colour.
+        """
+        if self.legs_live:
+            return
+        col = QColor("#4CD4B0")
+
+        # While marking is armed and the pair is incomplete, say so on the
+        # picture. The whole of the first report of this feature was "clicking
+        # does nothing", from a mode that was on and gave the frame no way to
+        # show it: nothing about a plain video frame distinguishes "waiting for
+        # your two clicks" from "not listening". A banner costs one drawText
+        # and removes the entire question.
+        if self.legs_edit and len(self.legs or []) < 2:
+            n = len(self.legs or [])
+            msg = ("  Click the second leg point  " if n == 1
+                   else "  Click the first leg point  ")
+            band = QRectF(0, 8, self.width(), 24)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(10, 14, 22, 190))
+            box = QRectF(self.width() / 2 - 110, 8, 220, 24)
+            p.drawRoundedRect(box, 5, 5)
+            p.setPen(QPen(col, 1.0))
+            p.drawText(band, Qt.AlignHCenter | Qt.AlignVCenter, msg)
+
+        if not self.legs:
+            return
+        pts = [self._to_widget(x, y) for x, y in self.legs]
+
+        if len(pts) == 2:
+            pen = QPen(col, 1.6, Qt.DashLine)
+            pen.setCosmetic(True)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawLine(pts[0], pts[1])
+
+        for i, pt in enumerate(pts):
+            p.setPen(QPen(QColor("#0A0E16"), 1.2))
+            p.setBrush(col)
+            p.drawEllipse(pt, LEG_R, LEG_R)
+            # A hollow centre, so the exact pixel the mark sits on stays visible
+            # underneath it. A solid dot hides the feature you are aiming at.
+            p.setBrush(QColor("#0A0E16"))
+            p.drawEllipse(pt, 1.6, 1.6)
+            p.setPen(QPen(col, 1.0))
+            p.drawText(QRectF(pt.x() + LEG_R + 2, pt.y() - 8, 16, 16),
+                       Qt.AlignLeft | Qt.AlignVCenter, LEG_LABELS[i])
+
     # ---- interaction -----------------------------------------------------
 
     def _hit(self, pos: QPointF) -> str | None:
@@ -407,6 +544,27 @@ class PreviewView(QLabel):
         still reachable everywhere around it. Drawing a fresh region is last,
         so it can never pre-empt an adjustment to something already there.
         """
+        # Marking the legs is *modal*, and while it is armed nothing else on the
+        # picture responds at all. The three overlays sit on top of each other
+        # by construction -- the marks are on the robot, the outline is on the
+        # robot, and the region is drawn around the robot -- so a priority order
+        # is not enough to stop them competing for the same click: a mark near
+        # the region's edge grabs a resize handle, and a click meant for the
+        # second mark starts dragging a new region out from under it. Answering
+        # "only the marks, until you are done" makes every click unambiguous
+        # while placing, and gives the region back the moment marking is off.
+        #
+        # The guard is the frame *size*, not the pixmap. Requiring a pixmap
+        # meant marking silently did nothing whenever the preview happened to be
+        # between renders, which is a state the user has no way to see.
+        if self.legs_edit:
+            leg = self._leg_hit(pos)
+            if leg is not None:
+                return leg
+            if self._image_size[0] and len(self.legs or []) < 2:
+                return "leg_new"
+            return None
+
         outline_live = self.editable and self.pose is not None
         hit = self._hit(pos) if outline_live else None
         if hit is not None and hit != "move":
@@ -426,6 +584,21 @@ class PreviewView(QLabel):
         hit = self.hit_test(ev.position())
         if hit is None:
             return super().mousePressEvent(ev)
+
+        if hit in ("leg0", "leg1"):
+            self._leg_drag = int(hit[-1])
+            self.setCursor(Qt.ClosedHandCursor)
+            ev.accept()
+            return
+
+        if hit == "leg_new":
+            ix, iy = self._to_image(ev.position())
+            self.legs = (self.legs or []) + [[ix, iy]]
+            self._leg_drag = len(self.legs) - 1
+            self.setCursor(Qt.ClosedHandCursor)
+            self.update()
+            ev.accept()
+            return
 
         if hit in ROI_CURSORS or hit in ROI_HANDLES:
             self._roi_drag = hit
@@ -461,6 +634,15 @@ class PreviewView(QLabel):
 
     def mouseMoveEvent(self, ev):
         pos = ev.position()
+        if self._leg_drag is not None:
+            # Placing and adjusting are the same gesture: the click that creates
+            # a mark leaves it under the cursor, so it can be nudged onto the
+            # feature before the button comes up instead of needing a second
+            # grab to correct a click that landed a few pixels off.
+            self.legs[self._leg_drag] = list(self._to_image(pos))
+            self.update()
+            ev.accept()
+            return
         if self._roi_drag is not None:
             self._drag_roi(pos, ev.modifiers())
             self.update()
@@ -561,6 +743,19 @@ class PreviewView(QLabel):
         return (x, y, X - x, Y - y, 0.0)
 
     def mouseReleaseEvent(self, ev):
+        if self._leg_drag is not None:
+            self._leg_drag = None
+            self.setCursor(Qt.CrossCursor)
+            # Only the finished pair is announced, and the half-placed state is
+            # not announced at all -- not even as None. Emitting after the first
+            # click told the rest of the app the marks had been cleared, which
+            # is the opposite of what just happened, and left it disagreeing
+            # with the picture until the second click put it right.
+            marks = self.leg_marks()
+            if marks is not None:
+                self.legsChanged.emit(marks)
+            ev.accept()
+            return
         if self._roi_drag is not None:
             self._roi_drag = None
             self._roi_start = None

@@ -62,6 +62,11 @@ def get_device(prefer_gpu: bool = True) -> Device:
 
 _TRUST_CACHE: dict[str, tuple[bool, str]] = {}
 
+# Device kinds whose histogram kernel has already failed once. Otsu runs per
+# frame; rediscovering the same failure every frame is the expensive way to
+# reach the same answer.
+_HIST_CPU: dict[str, bool] = {}
+
 
 def verify_device(dev: Device) -> tuple[bool, str]:
     """Check that this backend computes what the fitter needs it to.
@@ -166,15 +171,29 @@ def otsu_threshold(x: torch.Tensor, bins: int = 256) -> float:
     operation back to the CPU if the whole function fell back.
     """
     flat = x.flatten().float()
-    if flat.device.type == "mps":
-        try:
-            torch.histc(flat[:8], bins=4, min=0.0, max=1.0)
-        except Exception:
-            return _otsu_cpu(flat.detach().cpu(), bins)
     lo, hi = float(flat.min()), float(flat.max())
     if hi <= lo:
         return hi
-    hist = torch.histc(flat, bins=bins, min=lo, max=hi)
+
+    # The real call, guarded -- not a probe.
+    #
+    # This used to try ``histc`` on eight elements with four bins and take that
+    # as proof the device could do it, then run the actual histogram over
+    # millions of elements with a different bin count and range, unguarded. The
+    # probe answers "is there a kernel at all", which current MPS satisfies, so
+    # the documented CPU fallback could never fire on the machine it was written
+    # for. Guarding the call that matters costs one try block and covers the
+    # case that was actually being defended against. Falling back is also
+    # *sticky*: this runs once per frame, and a device that failed on frame one
+    # will fail on frame two, so the answer is remembered rather than
+    # rediscovered a thousand times.
+    if _HIST_CPU.get(flat.device.type):
+        return _otsu_cpu(flat.detach().cpu(), bins)
+    try:
+        hist = torch.histc(flat, bins=bins, min=lo, max=hi)
+    except Exception:
+        _HIST_CPU[flat.device.type] = True
+        return _otsu_cpu(flat.detach().cpu(), bins)
     p = hist / hist.sum()
     centers = torch.linspace(lo, hi, bins, device=x.device)
     w0 = torch.cumsum(p, 0)
